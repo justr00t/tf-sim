@@ -1,0 +1,103 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket.compliant_audit_logs",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "compliant_audit_logs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "bucket": "company-audit-logs",
+          "server_side_encryption_configuration": [
+            {
+              "rule": [
+                {
+                  "apply_server_side_encryption_by_default": [
+                    {
+                      "kms_master_key_id": "arn:aws:kms:us-east-1:111122223333:key/123",
+                      "sse_algorithm": "aws:kms"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "versioning": [
+            {
+              "enabled": true
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket.unencrypted_reports",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "unencrypted_reports",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "bucket": "company-unencrypted-reports"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket.legacy_archive",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "legacy_archive",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "before": {
+          "bucket": "company-legacy-archive"
+        },
+        "after": {
+          "bucket": "company-legacy-archive"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "data.aws_s3_bucket.existing_bucket",
+      "mode": "data",
+      "type": "aws_s3_bucket",
+      "name": "existing_bucket",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "read"
+        ],
+        "before": null,
+        "after": {
+          "bucket": "company-existing-bucket"
+        },
+        "after_unknown": {}
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {}
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "google_storage_bucket.secure_models",
+      "mode": "managed",
+      "type": "google_storage_bucket",
+      "name": "secure_models",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "encryption": [
+            {
+              "default_kms_key_name": "projects/p1/locations/global/keyRings/r1/cryptoKeys/k1"
+            }
+          ],
+          "location": "US",
+          "name": "ml-models-secure",
+          "uniform_bucket_level_access": true
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_storage_bucket.open_training_data",
+      "mode": "managed",
+      "type": "google_storage_bucket",
+      "name": "open_training_data",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "location": "US",
+          "name": "ml-training-raw",
+          "uniform_bucket_level_access": false
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_storage_bucket.checkpoint_cache",
+      "mode": "data",
+      "type": "google_storage_bucket",
+      "name": "checkpoint_cache",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": [
+          "read"
+        ],
+        "before": null,
+        "after": {
+          "name": "ml-checkpoint-cache"
+        },
+        "after_unknown": {}
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {}
+  }
+}

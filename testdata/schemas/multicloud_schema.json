@@ -1,0 +1,228 @@
+{
+  "format_version": "1.0",
+  "provider_schemas": {
+    "registry.terraform.io/hashicorp/aws": {
+      "resource_schemas": {
+        "aws_s3_bucket": {
+          "block": {
+            "attributes": {
+              "arn": {
+                "type": "string",
+                "computed": true
+              },
+              "bucket": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "bucket_prefix": {
+                "type": "string",
+                "optional": true
+              },
+              "tags": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            },
+            "block_types": {
+              "logging": {
+                "nesting_mode": "list",
+                "block": {
+                  "attributes": {
+                    "target_bucket": {
+                      "type": "string",
+                      "required": true
+                    },
+                    "target_prefix": {
+                      "type": "string",
+                      "optional": true
+                    }
+                  }
+                }
+              },
+              "server_side_encryption_configuration": {
+                "nesting_mode": "list",
+                "block": {
+                  "block_types": {
+                    "rule": {
+                      "nesting_mode": "list",
+                      "block": {
+                        "attributes": {
+                          "bucket_key_enabled": {
+                            "type": "bool",
+                            "optional": true
+                          }
+                        },
+                        "block_types": {
+                          "apply_server_side_encryption_by_default": {
+                            "nesting_mode": "list",
+                            "block": {
+                              "attributes": {
+                                "kms_master_key_id": {
+                                  "type": "string",
+                                  "optional": true
+                                },
+                                "sse_algorithm": {
+                                  "type": "string",
+                                  "required": true
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "versioning": {
+                "nesting_mode": "list",
+                "block": {
+                  "attributes": {
+                    "enabled": {
+                      "type": "bool",
+                      "optional": true
+                    },
+                    "mfa_delete": {
+                      "type": "bool",
+                      "optional": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "registry.terraform.io/hashicorp/azurerm": {
+      "resource_schemas": {
+        "azurerm_storage_account": {
+          "block": {
+            "attributes": {
+              "account_replication_type": {
+                "type": "string",
+                "required": true
+              },
+              "account_tier": {
+                "type": "string",
+                "required": true
+              },
+              "allow_nested_items_to_be_public": {
+                "type": "bool",
+                "optional": true
+              },
+              "https_traffic_only_enabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "location": {
+                "type": "string",
+                "required": true
+              },
+              "min_tls_version": {
+                "type": "string",
+                "optional": true
+              },
+              "name": {
+                "type": "string",
+                "required": true
+              },
+              "resource_group_name": {
+                "type": "string",
+                "required": true
+              },
+              "tags": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            },
+            "block_types": {
+              "network_rules": {
+                "nesting_mode": "list",
+                "block": {
+                  "attributes": {
+                    "bypass": {
+                      "type": [
+                        "list",
+                        "string"
+                      ],
+                      "optional": true
+                    },
+                    "default_action": {
+                      "type": "string",
+                      "required": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "registry.terraform.io/hashicorp/google": {
+      "resource_schemas": {
+        "google_storage_bucket": {
+          "block": {
+            "attributes": {
+              "labels": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              },
+              "location": {
+                "type": "string",
+                "required": true
+              },
+              "name": {
+                "type": "string",
+                "required": true
+              },
+              "storage_class": {
+                "type": "string",
+                "optional": true
+              },
+              "uniform_bucket_level_access": {
+                "type": "bool",
+                "optional": true
+              }
+            },
+            "block_types": {
+              "encryption": {
+                "nesting_mode": "list",
+                "block": {
+                  "attributes": {
+                    "default_kms_key_name": {
+                      "type": "string",
+                      "required": true
+                    }
+                  }
+                }
+              },
+              "versioning": {
+                "nesting_mode": "list",
+                "block": {
+                  "attributes": {
+                    "enabled": {
+                      "type": "bool",
+                      "required": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

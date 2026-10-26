@@ -1,0 +1,33 @@
+# Binaries & build artifacts
+/tf-sim
+/tf-sim.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Test binary & coverage output
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Editor / IDE / OS directories
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local multi-agent development artifacts (kept locally, excluded from public repo)
+/AGENTS.md
+/plans/
