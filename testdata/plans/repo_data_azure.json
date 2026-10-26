@@ -1,0 +1,85 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "azurerm_storage_account.compliant_lake",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "compliant_lake",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "account_replication_type": "GRS",
+          "account_tier": "Standard",
+          "https_traffic_only_enabled": true,
+          "location": "eastus2",
+          "min_tls_version": "TLS1_2",
+          "name": "datalakeprod",
+          "resource_group_name": "rg-data"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_storage_account.insecure_transfer",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "insecure_transfer",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "before": {
+          "account_replication_type": "LRS",
+          "account_tier": "Standard",
+          "https_traffic_only_enabled": false,
+          "location": "eastus2",
+          "name": "insecuretransfer",
+          "resource_group_name": "rg-data"
+        },
+        "after": {
+          "account_replication_type": "LRS",
+          "account_tier": "Standard",
+          "https_traffic_only_enabled": false,
+          "location": "eastus2",
+          "name": "insecuretransfer",
+          "resource_group_name": "rg-data"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_storage_account.static_assets",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "static_assets",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": [
+          "no-op"
+        ],
+        "before": {
+          "name": "staticassets"
+        },
+        "after": {
+          "name": "staticassets"
+        },
+        "after_unknown": {}
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {}
+  }
+}
