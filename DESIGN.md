@@ -106,7 +106,8 @@ tf-sim/
 ├── cmd/
 │   └── tf-sim/
 │       ├── main.go                  # CLI entrypoint (verify, eval, backtest, remediate)
-│       └── main_test.go             # End-to-end CLI & exit code integration tests
+│       ├── main_test.go             # CLI unit & exit code integration tests
+│       └── e2e_test.go              # Closed-loop multi-cloud E2E lifecycle test suite
 ├── internal/
 │   ├── model/
 │   │   └── types.go                 # Shared domain models & core interfaces
