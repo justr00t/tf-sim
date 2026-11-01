@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/justr00t/tf-sim/internal/engine"
 	"github.com/justr00t/tf-sim/internal/model"
+	"github.com/justr00t/tf-sim/internal/parser"
 	"github.com/open-policy-agent/opa/v1/ast"
 )
 
@@ -1129,4 +1132,219 @@ func deduplicateDiagnostics(diags []model.SchemaDiagnostic) []model.SchemaDiagno
 		}
 	}
 	return result
+}
+
+type fixtureSnapshot struct {
+	displayPath string
+	snapshot    *model.PlanSnapshot
+}
+
+// VerifyPoliciesWithFixtures performs static AST and provider schema analysis on one or more Rego policies,
+// and additionally evaluates optional pass-fixture plans (expecting 0 violations) and fail-fixture plans
+// (expecting >= 1 violation).
+func (v *Verifier) VerifyPoliciesWithFixtures(
+	ctx context.Context,
+	policyPaths []string,
+	schemas model.ProviderSchemaMap,
+	passFixturePaths []string,
+	failFixturePaths []string,
+) (*model.VerificationResult, error) {
+	res, err := v.VerifyPolicies(ctx, policyPaths, schemas)
+	if err != nil {
+		return nil, err
+	}
+
+	cleanedPass := cleanNonEmptyStrings(passFixturePaths)
+	cleanedFail := cleanNonEmptyStrings(failFixturePaths)
+	if len(cleanedPass) == 0 && len(cleanedFail) == 0 {
+		return res, nil
+	}
+
+	passSnaps, err := loadFixtureSnapshots(ctx, cleanedPass)
+	if err != nil {
+		return nil, err
+	}
+	failSnaps, err := loadFixtureSnapshots(ctx, cleanedFail)
+	if err != nil {
+		return nil, err
+	}
+
+	// If the policy failed Rego syntax parsing, AST compilation, or lacks a deny/violation entrypoint,
+	// return the static diagnostics directly rather than failing with a runtime evaluator compilation error.
+	if !canEvaluatePolicy(res) {
+		return res, nil
+	}
+
+	ev := engine.NewEvaluator()
+	policyFileLabel := policyPaths[0]
+	var fixtureDiags []model.SchemaDiagnostic
+
+	for _, fs := range passSnaps {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		evalRes, err := ev.EvaluatePlan(ctx, policyPaths, fs.snapshot)
+		if err != nil {
+			return nil, fmt.Errorf("evaluating pass fixture %q: %w", fs.displayPath, err)
+		}
+		if len(evalRes.Violations) > 0 {
+			ruleSet := make(map[string]bool)
+			var ruleIDs []string
+			for _, viol := range evalRes.Violations {
+				id := strings.TrimSpace(viol.RuleID)
+				if id == "" {
+					id = "unknown"
+				}
+				if !ruleSet[id] {
+					ruleSet[id] = true
+					ruleIDs = append(ruleIDs, id)
+				}
+			}
+			sort.Strings(ruleIDs)
+			fixtureDiags = append(fixtureDiags, model.SchemaDiagnostic{
+				PolicyFile:   policyFileLabel,
+				Line:         1,
+				ResourceType: "fixture:pass",
+				InvalidPath:  fs.displayPath,
+				Message:      fmt.Sprintf("Pass fixture %q failed: expected 0 violations, got %d (%s)", fs.displayPath, len(evalRes.Violations), strings.Join(ruleIDs, ", ")),
+				Severity:     "ERROR",
+			})
+		}
+	}
+
+	for _, fs := range failSnaps {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		evalRes, err := ev.EvaluatePlan(ctx, policyPaths, fs.snapshot)
+		if err != nil {
+			return nil, fmt.Errorf("evaluating fail fixture %q: %w", fs.displayPath, err)
+		}
+		if len(evalRes.Violations) == 0 {
+			fixtureDiags = append(fixtureDiags, model.SchemaDiagnostic{
+				PolicyFile:   policyFileLabel,
+				Line:         1,
+				ResourceType: "fixture:fail",
+				InvalidPath:  fs.displayPath,
+				Message:      fmt.Sprintf("Fail fixture %q passed unexpectedly: expected at least 1 violation, got 0 — potential silent fail-open bug", fs.displayPath),
+				Severity:     "ERROR",
+			})
+		}
+	}
+
+	if len(fixtureDiags) > 0 {
+		res.Diagnostics = append(res.Diagnostics, fixtureDiags...)
+		res.Diagnostics = deduplicateDiagnostics(res.Diagnostics)
+		sort.Slice(res.Diagnostics, func(i, j int) bool {
+			if res.Diagnostics[i].PolicyFile != res.Diagnostics[j].PolicyFile {
+				return res.Diagnostics[i].PolicyFile < res.Diagnostics[j].PolicyFile
+			}
+			if res.Diagnostics[i].Line != res.Diagnostics[j].Line {
+				return res.Diagnostics[i].Line < res.Diagnostics[j].Line
+			}
+			if res.Diagnostics[i].ResourceType != res.Diagnostics[j].ResourceType {
+				return res.Diagnostics[i].ResourceType < res.Diagnostics[j].ResourceType
+			}
+			return res.Diagnostics[i].InvalidPath < res.Diagnostics[j].InvalidPath
+		})
+		res.Valid = false
+	}
+
+	return res, nil
+}
+
+func cleanNonEmptyStrings(items []string) []string {
+	var out []string
+	for _, item := range items {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func canEvaluatePolicy(res *model.VerificationResult) bool {
+	if res == nil || strings.TrimSpace(res.PackageName) == "" {
+		return false
+	}
+	for _, d := range res.Diagnostics {
+		if d.ResourceType == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func loadFixtureSnapshots(ctx context.Context, paths []string) ([]fixtureSnapshot, error) {
+	p := parser.NewParser()
+	var results []fixtureSnapshot
+
+	for _, rawPath := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lfi, err := os.Lstat(rawPath)
+		if err != nil {
+			return nil, fmt.Errorf("stat fixture path %q: %w", rawPath, err)
+		}
+		if lfi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("fixture path %q is a symlink", rawPath)
+		}
+
+		if !lfi.IsDir() {
+			base := filepath.Base(rawPath)
+			repoName := strings.TrimSuffix(base, filepath.Ext(base))
+			snap, err := p.ParsePlanFile(ctx, rawPath, repoName)
+			if err != nil {
+				return nil, fmt.Errorf("parsing fixture plan %q: %w", rawPath, err)
+			}
+			results = append(results, fixtureSnapshot{
+				displayPath: filepath.ToSlash(rawPath),
+				snapshot:    snap,
+			})
+			continue
+		}
+
+		var jsonFiles []string
+		err = filepath.WalkDir(rawPath, func(walkPath string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				return nil
+			}
+			if !d.IsDir() && strings.EqualFold(filepath.Ext(walkPath), ".json") {
+				jsonFiles = append(jsonFiles, walkPath)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("walking fixture directory %q: %w", rawPath, err)
+		}
+		if len(jsonFiles) == 0 {
+			return nil, fmt.Errorf("fixture directory %q contains no .json plan files", rawPath)
+		}
+		sort.Strings(jsonFiles)
+
+		for _, jf := range jsonFiles {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			base := filepath.Base(jf)
+			repoName := strings.TrimSuffix(base, filepath.Ext(base))
+			snap, err := p.ParsePlanFile(ctx, jf, repoName)
+			if err != nil {
+				return nil, fmt.Errorf("parsing fixture plan %q: %w", jf, err)
+			}
+			results = append(results, fixtureSnapshot{
+				displayPath: filepath.ToSlash(jf),
+				snapshot:    snap,
+			})
+		}
+	}
+
+	return results, nil
 }

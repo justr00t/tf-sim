@@ -345,8 +345,10 @@ type Verifier struct{}
 
 func NewVerifier() *Verifier
 
-// Concrete method implementing model.ASTVerifier:
+// Concrete methods implementing model.ASTVerifier, multi-file policy verification, and pass/fail fixture checks:
 func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas model.ProviderSchemaMap) (*model.VerificationResult, error)
+func (v *Verifier) VerifyPolicies(ctx context.Context, policyPaths []string, schemas model.ProviderSchemaMap) (*model.VerificationResult, error)
+func (v *Verifier) VerifyPoliciesWithFixtures(ctx context.Context, policyPaths []string, schemas model.ProviderSchemaMap, passFixturePaths, failFixturePaths []string) (*model.VerificationResult, error)
 ```
 
 #### Concrete `internal/engine` Constructors & Methods
@@ -391,6 +393,7 @@ const (
 	FormatTable    = "table"
 	FormatJSON     = "json"
 	FormatMarkdown = "markdown"
+	FormatSARIF    = "sarif"
 )
 
 func FormatVerificationResult(res *model.VerificationResult, format string) (string, error)
@@ -456,6 +459,8 @@ To guarantee a Rego policy will not silently "fail-open" due to hallucinated or 
    - When `schemas` is supplied:
      - If the referenced `resource_type` does not exist in `schemas`, emit an `ERROR` diagnostic (`Unknown resource type in schema`).
      - Traverse `ResourceSchema.Attributes` and `ResourceSchema.NestedBlocks` segment-by-segment (ignoring array index variables/wildcards like `[_]` or `[i]`). If any attribute or nested block segment does not exist in `schemas[resource_type]`, emit an `ERROR` diagnostic with the exact line number, `ResourceType`, and `InvalidPath` (e.g., `"https_only_enabled"` on `"azurerm_storage_account"`).
+5. **Pass/Fail Fixture Verification (`VerifyPoliciesWithFixtures`, `--pass-fixtures`, `--fail-fixtures`):**
+   - Evaluates compliant fixture plans (expecting `0` violations) and non-compliant fixture plans (expecting `>= 1` violation) from individual `.json` files or directories, emitting `fixture:pass` or `fixture:fail` `ERROR` diagnostics if expectations are violated.
 
 ### 6.3 `internal/engine`: In-Memory Evaluator & Rego Rule Contract
 `PolicyEvaluator` executes candidate policies against `PlanSnapshot` structures in memory:
@@ -513,11 +518,12 @@ When `PolicyViolation` includes a `RemediationSpec`:
 4. **Deterministic Sorting:** Violations within each `RepoImpact` are sorted by `ResourceAddress` ASC, then `RuleID` ASC. `RepoImpacts` are sorted by `RepoName` ASC.
 5. **Directory Snapshot Ingestion (`LoadSnapshotsFromDir`):** Recursively walks `.json` plan files in alphabetical order, inferring repository names from subdirectory names (nested) or filename stems (flat).
 
-### 6.6 `internal/report`: Multi-Format Reporting (Table, JSON, Markdown)
-1. **Universal Formatters:** Formats `model.VerificationResult`, `model.EvalResult`, `model.BlastRadiusReport`, and `[]model.RemediationPatch` into `table`, `json`, or `markdown`.
+### 6.6 `internal/report`: Multi-Format Reporting (Table, JSON, Markdown, SARIF)
+1. **Universal Formatters:** Formats `model.VerificationResult`, `model.EvalResult`, `model.BlastRadiusReport`, and `[]model.RemediationPatch` into `table`, `json`, `markdown`, or `sarif`.
 2. **Pure-Go Terminal Tables:** Renders aligned monospaced tables using standard library `text/tabwriter`.
 3. **Pure-Go JSON:** Indented JSON formatting via `encoding/json.MarshalIndent`.
 4. **Pure-Go Markdown:** GitHub/GitLab PR comment formatting with status badges, summary metric tables, and collapsible `<details>` blocks for violation drilldowns.
+5. **Pure-Go SARIF v2.1.0:** Emits schema-compliant SARIF v2.1.0 (`https://json.schemastore.org/sarif-2.1.0.json`) for GitHub Code Scanning and CI/CD security dashboards with normalized forward-slash `artifactLocation.uri` paths, deduplicated `tool.driver.rules`, and severity-to-level mapping (`error`, `warning`, `note`).
 
 ---
 

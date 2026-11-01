@@ -21,7 +21,7 @@ Platform and security engineering teams suffer from **"Audit-to-Enforce Paralysi
 
 | Command | Stage | What It Does |
 | :--- | :--- | :--- |
-| **`tf-sim verify`** | **Author & Prove** | Inspects the Rego v1 AST (`opa/v1/ast`) across one or more `--policy` files and cross-references every resource type, nested attribute reference, and `remediation.attribute_path` target against `terraform providers schema -json` to statically prevent silent fail-open typos and invalid remediation patches. |
+| **`tf-sim verify`** | **Author & Prove** | Inspects the Rego v1 AST (`opa/v1/ast`) across one or more `--policy` files, cross-references every resource type, nested attribute reference, and `remediation.attribute_path` target against `terraform providers schema -json`, and verifies the policy against `--pass-fixtures` and `--fail-fixtures` plan snapshots to prevent silent fail-open bugs. |
 | **`tf-sim backtest`** | **Simulate Blast Radius** | Evaluates candidate policies concurrently across a historical corpus of `terraform plan -json` snapshots—answering in milliseconds which exact repos, plans, and cloud resources would break if enforced today. |
 | **`tf-sim eval`** | **Enforce in CI/CD** | Streams single `terraform plan -json` artifacts in $O(1)$ bounded memory (skipping massive `prior_state` / `configuration` blobs) and evaluates `resource_changes` deterministically. |
 | **`tf-sim remediate`** | **Auto-Patch HCL** | Maps policy violations back to source `.tf` files, mutates the HCL AST in-place via `hclwrite` (preserving comments and formatting), and generates unified Git diffs (`.patch`) for automated GitOps PRs. |
@@ -48,7 +48,7 @@ flowchart TD
         Remediator["5. RemediationGenerator (internal/remediate)\nhclwrite AST Patch & Unified Diff"]
     end
 
-    subgraph Outputs["Deterministic Outputs (table | json | markdown)"]
+    subgraph Outputs["Deterministic Outputs (table | json | markdown | sarif)"]
         VerifyOut["Policy Safety Report\n(Catches Fail-Open / Schema Typos)"]
         EvalOut["Evaluation Verdict & Exit Code"]
         BlastOut["Blast-Radius Impact Report\n(Broken Repos / Pipelines / Resources)"]
@@ -103,11 +103,12 @@ This repository includes multi-cloud fixtures (`AWS`, `Azure`, and `GCP`) in [`t
 ```
 *(Exits with code `1` and pinpoints the exact line and invalid schema attribute path.)*
 
-Now verify the valid multi-cloud storage encryption policy:
+Now verify the valid multi-cloud storage encryption policy (and assert that non-compliant fixtures fail evaluation via `--fail-fixtures`; use `--pass-fixtures` for compliant fixtures):
 ```bash
 ./tf-sim verify \
   --policy testdata/policies/storage_encryption.rego \
-  --schema testdata/schemas/multicloud_schema.json
+  --schema testdata/schemas/multicloud_schema.json \
+  --fail-fixtures testdata/plans
 ```
 *(Exits with code `0` — `VALID`.)*
 
@@ -127,6 +128,12 @@ See what would break across your organization's AWS, Azure, and GCP repositories
   --policy testdata/policies/storage_encryption.rego \
   --plan testdata/plans/repo_payments_aws.json \
   --format markdown
+
+# Or emit SARIF v2.1.0 for GitHub Code Scanning / SAST dashboards:
+./tf-sim eval \
+  --policy testdata/policies/storage_encryption.rego \
+  --plan testdata/plans/repo_payments_aws.json \
+  --format sarif
 ```
 
 ### 4. Generate Surgical HCL Auto-Remediation Diffs (`remediate`)

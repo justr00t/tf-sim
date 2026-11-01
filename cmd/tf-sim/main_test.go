@@ -643,3 +643,221 @@ resource "aws_s3_bucket" "logs" {
 		t.Errorf("expected modules/storage/main.tf to preserve count = 2, got:\n%s", gotStorageStr)
 	}
 }
+
+// TestCLI_Verify_WithPassAndFailFixtures tests `tf-sim verify` with `--pass-fixtures` and `--fail-fixtures`.
+func TestCLI_Verify_WithPassAndFailFixtures(t *testing.T) {
+	ctx := context.Background()
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	failFixturePath := filepath.Join("..", "..", "testdata", "plans", "repo_payments_aws.json")
+
+	tmpDir := t.TempDir()
+	passFixturePath := filepath.Join(tmpDir, "compliant_plan.json")
+	if err := os.WriteFile(passFixturePath, []byte(compliantPlanJSON), 0o600); err != nil {
+		t.Fatalf("failed to write compliant_plan.json: %v", err)
+	}
+
+	t.Run("MatchingPassAndFailFixtures_ReturnsExitOK", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Execute(ctx, []string{
+			"verify",
+			"--policy", policyPath,
+			"--schema", schemaPath,
+			"--pass-fixtures", passFixturePath,
+			"--fail-fixtures", failFixturePath,
+			"--format", "json",
+		}, &stdout, &stderr)
+
+		if code != ExitOK {
+			t.Fatalf("expected ExitOK (%d), got %d; stderr: %s; stdout: %s", ExitOK, code, stderr.String(), stdout.String())
+		}
+		var res model.VerificationResult
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to unmarshal VerificationResult JSON: %v", err)
+		}
+		if !res.Valid || len(res.Diagnostics) != 0 {
+			t.Errorf("expected Valid == true and 0 diagnostics, got: %+v", res)
+		}
+	})
+
+	t.Run("PassFixtureWithViolations_ReturnsExitViolation", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Execute(ctx, []string{
+			"verify",
+			"--policy", policyPath,
+			"--schema", schemaPath,
+			"--pass-fixtures", failFixturePath,
+			"--format", "json",
+		}, &stdout, &stderr)
+
+		if code != ExitViolation {
+			t.Fatalf("expected ExitViolation (%d), got %d; stderr: %s; stdout: %s", ExitViolation, code, stderr.String(), stdout.String())
+		}
+		var res model.VerificationResult
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to unmarshal VerificationResult JSON: %v", err)
+		}
+		if res.Valid || len(res.Diagnostics) == 0 || res.Diagnostics[0].ResourceType != "fixture:pass" {
+			t.Errorf("expected fixture:pass diagnostic with Valid == false, got: %+v", res)
+		}
+	})
+
+	t.Run("FailFixturePassingSilently_ReturnsExitViolation", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Execute(ctx, []string{
+			"verify",
+			"--policy", policyPath,
+			"--schema", schemaPath,
+			"--fail-fixtures", passFixturePath,
+			"--format", "json",
+		}, &stdout, &stderr)
+
+		if code != ExitViolation {
+			t.Fatalf("expected ExitViolation (%d), got %d; stderr: %s; stdout: %s", ExitViolation, code, stderr.String(), stdout.String())
+		}
+		var res model.VerificationResult
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to unmarshal VerificationResult JSON: %v", err)
+		}
+		if res.Valid || len(res.Diagnostics) == 0 || res.Diagnostics[0].ResourceType != "fixture:fail" {
+			t.Errorf("expected fixture:fail diagnostic with Valid == false, got: %+v", res)
+		}
+	})
+}
+
+// TestCLI_AllCommands_SARIFFormat tests `--format sarif` across `verify`, `eval`, `backtest`, and `remediate`.
+func TestCLI_AllCommands_SARIFFormat(t *testing.T) {
+	ctx := context.Background()
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+	brokenPolicyPath := filepath.Join("..", "..", "testdata", "policies", "broken_fail_open.rego")
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	planPath := filepath.Join("..", "..", "testdata", "plans", "repo_payments_aws.json")
+	plansDir := filepath.Join("..", "..", "testdata", "plans")
+	tfDir := filepath.Join("..", "..", "testdata", "repos", "payments-aws")
+
+	assertValidSARIF := func(t *testing.T, raw string, wantMinResults int) {
+		t.Helper()
+		var parsed struct {
+			Schema  string `json:"$schema"`
+			Version string `json:"version"`
+			Runs    []struct {
+				Tool struct {
+					Driver struct {
+						Name string `json:"name"`
+					} `json:"driver"`
+				} `json:"tool"`
+				Results []map[string]any `json:"results"`
+			} `json:"runs"`
+		}
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			t.Fatalf("invalid SARIF JSON: %v\nOutput:\n%s", err, raw)
+		}
+		if parsed.Version != "2.1.0" {
+			t.Errorf("expected SARIF version 2.1.0, got %q", parsed.Version)
+		}
+		if parsed.Schema != "https://json.schemastore.org/sarif-2.1.0.json" {
+			t.Errorf("expected SARIF $schema https://json.schemastore.org/sarif-2.1.0.json, got %q", parsed.Schema)
+		}
+		if len(parsed.Runs) != 1 || parsed.Runs[0].Tool.Driver.Name != "tf-sim" {
+			t.Fatalf("unexpected SARIF runs/driver: %+v", parsed.Runs)
+		}
+		if len(parsed.Runs[0].Results) < wantMinResults {
+			t.Errorf("expected at least %d SARIF results, got %d", wantMinResults, len(parsed.Runs[0].Results))
+		}
+	}
+
+	t.Run("Verify_SARIF", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Execute(ctx, []string{
+			"verify",
+			"--policy", brokenPolicyPath,
+			"--schema", schemaPath,
+			"--format", "sarif",
+		}, &stdout, &stderr)
+		if code != ExitViolation {
+			t.Fatalf("expected ExitViolation (%d), got %d; stderr: %s", ExitViolation, code, stderr.String())
+		}
+		assertValidSARIF(t, stdout.String(), 2)
+	})
+
+	t.Run("Eval_SARIF", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Execute(ctx, []string{
+			"eval",
+			"--policy", policyPath,
+			"--plan", planPath,
+			"--format", "sarif",
+		}, &stdout, &stderr)
+		if code != ExitViolation {
+			t.Fatalf("expected ExitViolation (%d), got %d; stderr: %s", ExitViolation, code, stderr.String())
+		}
+		assertValidSARIF(t, stdout.String(), 1)
+	})
+
+	t.Run("Backtest_SARIF", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Execute(ctx, []string{
+			"backtest",
+			"--policy", policyPath,
+			"--plans-dir", plansDir,
+			"--format", "sarif",
+		}, &stdout, &stderr)
+		if code != ExitViolation {
+			t.Fatalf("expected ExitViolation (%d), got %d; stderr: %s", ExitViolation, code, stderr.String())
+		}
+		assertValidSARIF(t, stdout.String(), 3)
+	})
+
+	t.Run("Remediate_SARIF", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Execute(ctx, []string{
+			"remediate",
+			"--policy", policyPath,
+			"--plan", planPath,
+			"--tf-dir", tfDir,
+			"--format", "sarif",
+		}, &stdout, &stderr)
+		if code != ExitOK {
+			t.Fatalf("expected ExitOK (%d), got %d; stderr: %s", ExitOK, code, stderr.String())
+		}
+		assertValidSARIF(t, stdout.String(), 1)
+	})
+}
+
+// TestCLI_Verify_FixtureErrorsReturnExitError validates that missing or empty fixture directories return ExitError (2).
+func TestCLI_Verify_FixtureErrorsReturnExitError(t *testing.T) {
+	ctx := context.Background()
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+
+	t.Run("NonexistentPassFixture_ReturnsExitError", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		missingPath := filepath.Join(t.TempDir(), "nonexistent_fixture.json")
+		code := Execute(ctx, []string{
+			"verify",
+			"--policy", policyPath,
+			"--pass-fixtures", missingPath,
+		}, &stdout, &stderr)
+		if code != ExitError {
+			t.Errorf("expected ExitError (%d), got %d", ExitError, code)
+		}
+		if stderr.Len() == 0 {
+			t.Error("expected non-empty stderr")
+		}
+	})
+
+	t.Run("EmptyFailFixtureDir_ReturnsExitError", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		emptyDir := t.TempDir()
+		code := Execute(ctx, []string{
+			"verify",
+			"--policy", policyPath,
+			"--fail-fixtures", emptyDir,
+		}, &stdout, &stderr)
+		if code != ExitError {
+			t.Errorf("expected ExitError (%d), got %d", ExitError, code)
+		}
+		if stderr.Len() == 0 {
+			t.Error("expected non-empty stderr")
+		}
+	})
+}
