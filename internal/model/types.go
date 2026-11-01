@@ -128,6 +128,7 @@ type PlanParser interface {
 // ASTVerifier defines the contract for static Rego AST schema verification.
 type ASTVerifier interface {
 	VerifyPolicy(ctx context.Context, policyPath string, schemas ProviderSchemaMap) (*VerificationResult, error)
+	VerifyPolicies(ctx context.Context, policyPaths []string, schemas ProviderSchemaMap) (*VerificationResult, error)
 }
 
 // PolicyEvaluator defines the contract for running Rego policies against a PlanSnapshot.

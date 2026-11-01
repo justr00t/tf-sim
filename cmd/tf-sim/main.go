@@ -86,18 +86,24 @@ func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
-		policyPath string
-		schemaPath string
-		format     string
+		policyPaths []string
+		schemaPath  string
+		format      string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "verify",
-		Short: "Verify a Rego policy AST against provider schemas to prevent fail-open bugs",
+		Short: "Verify Rego policy AST(s) against provider schemas to prevent fail-open bugs",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			if strings.TrimSpace(policyPath) == "" {
+			cleanedPaths := make([]string, 0, len(policyPaths))
+			for _, p := range policyPaths {
+				if trimmed := strings.TrimSpace(p); trimmed != "" {
+					cleanedPaths = append(cleanedPaths, trimmed)
+				}
+			}
+			if len(cleanedPaths) == 0 {
 				return fmt.Errorf("--policy is required")
 			}
 
@@ -112,7 +118,7 @@ func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 
 			v := verifier.NewVerifier()
-			res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+			res, err := v.VerifyPolicies(ctx, cleanedPaths, schemas)
 			if err != nil {
 				return fmt.Errorf("verifying policy: %w", err)
 			}
@@ -130,7 +136,7 @@ func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&policyPath, "policy", "", "Path to the Rego policy file (.rego)")
+	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego)")
 	cmd.Flags().StringVar(&schemaPath, "schema", "", "Path to the Terraform provider schema JSON file")
 	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json|markdown)")
 	_ = cmd.MarkFlagRequired("policy")

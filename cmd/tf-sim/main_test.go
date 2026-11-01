@@ -410,3 +410,125 @@ func TestCLI_HelpAndUnknownCommand(t *testing.T) {
 		}
 	})
 }
+
+// TestCLI_Verify_MultiFilePolicies tests `tf-sim verify` with multiple `--policy` flags.
+func TestCLI_Verify_MultiFilePolicies(t *testing.T) {
+	ctx := context.Background()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+
+	validHelpers := `package tfsim
+
+import rego.v1
+
+is_delete(rc) if {
+	rc.change.actions == ["delete"]
+}
+
+has_s3_encryption(rc) if {
+	some ssec in rc.change.after.server_side_encryption_configuration
+	some r in ssec.rule
+	some d in r.apply_server_side_encryption_by_default
+	d.sse_algorithm in ["aws:kms", "AES256"]
+}
+`
+
+	rulesContent := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	not is_delete(rc)
+	not has_s3_encryption(rc)
+	violation := {
+		"rule_id": "AWS-S3-MULTI-CLI-001",
+		"severity": "HIGH",
+		"message": "S3 bucket missing encryption",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+		"remediation": {
+			"attribute_path": [
+				"server_side_encryption_configuration",
+				"rule",
+				"apply_server_side_encryption_by_default",
+				"sse_algorithm",
+			],
+			"suggested_value": "aws:kms",
+		},
+	}
+}
+`
+
+	t.Run("ValidMultiFilePolicies_ReturnsExitOK", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		tmpDir := t.TempDir()
+		helpersPath := filepath.Join(tmpDir, "helpers.rego")
+		rulesPath := filepath.Join(tmpDir, "rules.rego")
+		if err := os.WriteFile(helpersPath, []byte(validHelpers), 0o600); err != nil {
+			t.Fatalf("failed to write helpers.rego: %v", err)
+		}
+		if err := os.WriteFile(rulesPath, []byte(rulesContent), 0o600); err != nil {
+			t.Fatalf("failed to write rules.rego: %v", err)
+		}
+
+		code := Execute(ctx, []string{
+			"verify",
+			"--policy", helpersPath,
+			"--policy", rulesPath,
+			"--schema", schemaPath,
+			"--format", "json",
+		}, &stdout, &stderr)
+
+		if code != ExitOK {
+			t.Fatalf("expected ExitOK (%d), got %d; stderr: %s; stdout: %s", ExitOK, code, stderr.String(), stdout.String())
+		}
+
+		var res model.VerificationResult
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to unmarshal VerificationResult JSON: %v\nOutput: %s", err, stdout.String())
+		}
+		if !res.Valid || len(res.Diagnostics) != 0 {
+			t.Errorf("expected Valid == true and 0 diagnostics, got: %+v", res)
+		}
+	})
+
+	t.Run("BrokenHelperInMultiFileBundle_ReturnsExitViolation", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		tmpDir := t.TempDir()
+		helpersPath := filepath.Join(tmpDir, "helpers.rego")
+		rulesPath := filepath.Join(tmpDir, "rules.rego")
+
+		brokenHelpers := strings.ReplaceAll(validHelpers, "sse_algorithm", "sse_algorithm_typo")
+		if err := os.WriteFile(helpersPath, []byte(brokenHelpers), 0o600); err != nil {
+			t.Fatalf("failed to write broken helpers.rego: %v", err)
+		}
+		if err := os.WriteFile(rulesPath, []byte(rulesContent), 0o600); err != nil {
+			t.Fatalf("failed to write rules.rego: %v", err)
+		}
+
+		code := Execute(ctx, []string{
+			"verify",
+			"--policy", helpersPath,
+			"--policy", rulesPath,
+			"--schema", schemaPath,
+			"--format", "json",
+		}, &stdout, &stderr)
+
+		if code != ExitViolation {
+			t.Fatalf("expected ExitViolation (%d), got %d; stderr: %s; stdout: %s", ExitViolation, code, stderr.String(), stdout.String())
+		}
+
+		var res model.VerificationResult
+		if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+			t.Fatalf("failed to unmarshal VerificationResult JSON: %v\nOutput: %s", err, stdout.String())
+		}
+		if res.Valid || len(res.Diagnostics) == 0 {
+			t.Fatalf("expected Valid == false with diagnostics, got: %+v", res)
+		}
+		if res.Diagnostics[0].PolicyFile != helpersPath || res.Diagnostics[0].InvalidPath != "sse_algorithm_typo" {
+			t.Errorf("expected diagnostic on PolicyFile %q with InvalidPath 'sse_algorithm_typo', got: %+v", helpersPath, res.Diagnostics[0])
+		}
+	})
+}

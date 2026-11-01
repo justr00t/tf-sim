@@ -835,3 +835,525 @@ deny contains violation if {
 		t.Errorf("expected ERROR diagnostic for InvalidPath 'bucket' ('is not a nested block'), got: %+v", res.Diagnostics)
 	}
 }
+
+func TestVerifyPolicy_RemediationAttributePath_Valid(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+# 1. Inline remediation.attribute_path in rule body (nested blocks + leaf attribute)
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	rc.change.after.bucket == "my-bucket"
+	violation := {
+		"rule_id": "AWS-S3-REM-VALID-001",
+		"severity": "HIGH",
+		"message": "inline body nested remediation path",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+		"remediation": {
+			"attribute_path": [
+				"server_side_encryption_configuration",
+				"rule",
+				"apply_server_side_encryption_by_default",
+				"sse_algorithm",
+			],
+			"suggested_value": "aws:kms",
+		},
+	}
+}
+
+# 2. Inline remediation.attribute_path directly in rule head
+deny contains {
+	"rule_id": "AZURE-HTTPS-REM-VALID-001",
+	"severity": "HIGH",
+	"message": "inline head top-level remediation path",
+	"resource_address": rc.address,
+	"resource_type": rc.type,
+	"resource_name": rc.name,
+	"remediation": {
+		"attribute_path": ["https_traffic_only_enabled"],
+		"suggested_value": true,
+	},
+} if {
+	some rc in input.resource_changes
+	rc.type == "azurerm_storage_account"
+	rc.change.after.https_traffic_only_enabled == false
+}
+
+# 3. Remediation via local variables (rem := {...} and path := [...]) and under a map attribute
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	rc.change.after.tags.Environment != "prod"
+	path := ["tags", "Environment"]
+	rem := {
+		"attribute_path": path,
+		"suggested_value": "prod",
+	}
+	violation := {
+		"rule_id": "AWS-TAGS-REM-VALID-001",
+		"severity": "MEDIUM",
+		"message": "local variable map remediation path",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+		"remediation": rem,
+	}
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "remediation_valid.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("expected Valid == true for valid remediation attribute_path forms, got false with diagnostics: %+v", res.Diagnostics)
+	}
+	if len(res.Diagnostics) != 0 {
+		t.Errorf("expected 0 diagnostics, got %d: %+v", len(res.Diagnostics), res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicies_MultiFile_ValidWithSharedHelpers(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	helpersContent := `package tfsim
+
+import rego.v1
+
+is_delete(rc) if {
+	rc.change.actions == ["delete"]
+}
+
+has_s3_encryption(rc) if {
+	some ssec in rc.change.after.server_side_encryption_configuration
+	some r in ssec.rule
+	some d in r.apply_server_side_encryption_by_default
+	d.sse_algorithm in ["aws:kms", "AES256"]
+}
+`
+
+	rulesContent := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	not is_delete(rc)
+	not has_s3_encryption(rc)
+	violation := {
+		"rule_id": "AWS-S3-MULTI-001",
+		"severity": "HIGH",
+		"message": "S3 bucket missing server-side encryption",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+		"remediation": {
+			"attribute_path": [
+				"server_side_encryption_configuration",
+				"rule",
+				"apply_server_side_encryption_by_default",
+				"sse_algorithm",
+			],
+			"suggested_value": "aws:kms",
+		},
+	}
+}
+`
+	tmpDir := t.TempDir()
+	helpersPath := filepath.Join(tmpDir, "helpers.rego")
+	rulesPath := filepath.Join(tmpDir, "rules.rego")
+	if err := os.WriteFile(helpersPath, []byte(helpersContent), 0644); err != nil {
+		t.Fatalf("failed to write helpers.rego: %v", err)
+	}
+	if err := os.WriteFile(rulesPath, []byte(rulesContent), 0644); err != nil {
+		t.Fatalf("failed to write rules.rego: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicies(ctx, []string{helpersPath, rulesPath}, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicies returned unexpected error: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("expected Valid == true for valid multi-file policies, got false with diagnostics: %+v", res.Diagnostics)
+	}
+	if len(res.Diagnostics) != 0 {
+		t.Errorf("expected 0 diagnostics, got %d: %+v", len(res.Diagnostics), res.Diagnostics)
+	}
+	if !strings.Contains(res.PolicyPath, helpersPath) || !strings.Contains(res.PolicyPath, rulesPath) {
+		t.Errorf("expected PolicyPath to contain both %q and %q, got %q", helpersPath, rulesPath, res.PolicyPath)
+	}
+}
+
+func TestVerifyPolicy_RemediationAttributePath_LeafIsNestedBlock(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	rc.change.after.bucket == "my-bucket"
+	violation := {
+		"rule_id": "AWS-S3-LEAF-BLOCK-001",
+		"severity": "HIGH",
+		"message": "leaf segment is nested block instead of attribute",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+		"remediation": {
+			"attribute_path": ["server_side_encryption_configuration", "rule"],
+			"suggested_value": "aws:kms",
+		},
+	}
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "leaf_nested_block.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected Valid == false when remediation.attribute_path leaf is a nested block, got true")
+	}
+
+	var foundNestedBlockDiag bool
+	for _, diag := range res.Diagnostics {
+		if diag.ResourceType == "aws_s3_bucket" && diag.InvalidPath == "rule" && diag.Severity == "ERROR" {
+			if strings.Contains(strings.ToLower(diag.Message), "nested block") {
+				foundNestedBlockDiag = true
+			}
+		}
+	}
+	if !foundNestedBlockDiag {
+		t.Errorf("expected ERROR diagnostic with InvalidPath == 'rule' mentioning 'nested block', got: %+v", res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicy_RemediationAttributePath_InRuleHeadAndLocalVars(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+deny contains {
+	"rule_id": "AZURE-HEAD-TYPO-001",
+	"severity": "HIGH",
+	"message": "typo in rule head remediation",
+	"resource_address": rc.address,
+	"resource_type": rc.type,
+	"resource_name": rc.name,
+	"remediation": {
+		"attribute_path": ["typo_in_head"],
+		"suggested_value": true,
+	},
+} if {
+	some rc in input.resource_changes
+	rc.type == "azurerm_storage_account"
+	rc.change.after.https_traffic_only_enabled == false
+}
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	rc.change.after.bucket == "my-bucket"
+	p := ["typo_in_var"]
+	rem := {
+		"attribute_path": p,
+		"suggested_value": "aws:kms",
+	}
+	violation := {
+		"rule_id": "AWS-VAR-TYPO-001",
+		"severity": "HIGH",
+		"message": "typo in local var remediation",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+		"remediation": rem,
+	}
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "head_and_local_vars_typo.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected Valid == false for remediation typos in head and local vars, got true")
+	}
+
+	var foundHeadTypo, foundVarTypo bool
+	for _, diag := range res.Diagnostics {
+		if diag.Severity != "ERROR" {
+			continue
+		}
+		if diag.ResourceType == "azurerm_storage_account" && diag.InvalidPath == "typo_in_head" {
+			foundHeadTypo = true
+		}
+		if diag.ResourceType == "aws_s3_bucket" && diag.InvalidPath == "typo_in_var" {
+			foundVarTypo = true
+		}
+	}
+	if !foundHeadTypo {
+		t.Errorf("expected ERROR diagnostic for InvalidPath == 'typo_in_head', got: %+v", res.Diagnostics)
+	}
+	if !foundVarTypo {
+		t.Errorf("expected ERROR diagnostic for InvalidPath == 'typo_in_var', got: %+v", res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicies_MultiFile_CrossFileHelperInvalidAttr(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	helpersContent := `package tfsim
+
+import rego.v1
+
+check_s3(rc) if {
+	rc.change.after.nonexistent_helper_attr == true
+}
+`
+
+	rulesContent := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	check_s3(rc)
+	violation := {
+		"rule_id": "AWS-CROSS-HELPER-001",
+		"severity": "HIGH",
+		"message": "cross-file helper check",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+`
+	tmpDir := t.TempDir()
+	helpersPath := filepath.Join(tmpDir, "helpers.rego")
+	rulesPath := filepath.Join(tmpDir, "rules.rego")
+	if err := os.WriteFile(helpersPath, []byte(helpersContent), 0644); err != nil {
+		t.Fatalf("failed to write helpers.rego: %v", err)
+	}
+	if err := os.WriteFile(rulesPath, []byte(rulesContent), 0644); err != nil {
+		t.Fatalf("failed to write rules.rego: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicies(ctx, []string{rulesPath, helpersPath}, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicies returned unexpected error: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected Valid == false when cross-file helper accesses invalid attribute, got true")
+	}
+
+	var foundHelperDiag bool
+	for _, diag := range res.Diagnostics {
+		if diag.PolicyFile == helpersPath &&
+			diag.ResourceType == "aws_s3_bucket" &&
+			diag.InvalidPath == "nonexistent_helper_attr" &&
+			diag.Severity == "ERROR" {
+			foundHelperDiag = true
+		}
+	}
+	if !foundHelperDiag {
+		t.Errorf("expected ERROR diagnostic attributed to PolicyFile %q with ResourceType 'aws_s3_bucket' and InvalidPath 'nonexistent_helper_attr', got: %+v", helpersPath, res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicy_RemediationAttributePath_InvalidLeafAndIntermediate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	rc.change.after.bucket == "my-bucket"
+	violation := {
+		"rule_id": "AWS-S3-LEAF-TYPO-001",
+		"severity": "HIGH",
+		"message": "leaf typo",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+		"remediation": {
+			"attribute_path": [
+				"server_side_encryption_configuration",
+				"rule",
+				"apply_server_side_encryption_by_default",
+				"sse_algo_typo",
+			],
+			"suggested_value": "aws:kms",
+		},
+	}
+}
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	rc.change.after.bucket == "my-bucket"
+	violation := {
+		"rule_id": "AWS-S3-INTERMEDIATE-TYPO-001",
+		"severity": "HIGH",
+		"message": "intermediate typo",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+		"remediation": {
+			"attribute_path": [
+				"server_side_encryption_config_typo",
+				"rule",
+				"sse_algorithm",
+			],
+			"suggested_value": "aws:kms",
+		},
+	}
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "invalid_leaf_and_intermediate.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected Valid == false for leaf and intermediate remediation path typos, got true")
+	}
+
+	var foundLeafTypo, foundIntermediateTypo bool
+	for _, diag := range res.Diagnostics {
+		if diag.ResourceType == "aws_s3_bucket" && diag.InvalidPath == "sse_algo_typo" && diag.Severity == "ERROR" {
+			foundLeafTypo = true
+			if diag.Line != 21 {
+				t.Errorf("expected line 21 for 'sse_algo_typo', got line %d", diag.Line)
+			}
+		}
+		if diag.ResourceType == "aws_s3_bucket" && diag.InvalidPath == "server_side_encryption_config_typo" && diag.Severity == "ERROR" {
+			foundIntermediateTypo = true
+			if diag.Line != 41 {
+				t.Errorf("expected line 41 for 'server_side_encryption_config_typo', got line %d", diag.Line)
+			}
+		}
+	}
+	if !foundLeafTypo {
+		t.Errorf("expected ERROR diagnostic for 'sse_algo_typo', got: %+v", res.Diagnostics)
+	}
+	if !foundIntermediateTypo {
+		t.Errorf("expected ERROR diagnostic for 'server_side_encryption_config_typo', got: %+v", res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicies_EmptyPathsAndMissingSecondFile(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	v := verifier.NewVerifier()
+	schemas := model.ProviderSchemaMap{}
+
+	_, err := v.VerifyPolicies(ctx, []string{}, schemas)
+	if err == nil {
+		t.Fatal("expected error when policyPaths is empty, got nil")
+	}
+	if !strings.Contains(err.Error(), "at least one policy path must be provided") {
+		t.Errorf("expected error to contain 'at least one policy path must be provided', got %q", err.Error())
+	}
+
+	validPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+	missingPath := filepath.Join(t.TempDir(), "missing_second_file.rego")
+
+	_, err = v.VerifyPolicies(ctx, []string{validPath, missingPath}, schemas)
+	if err == nil {
+		t.Fatal("expected error when second policy file does not exist, got nil")
+	}
+	if !strings.Contains(err.Error(), "stat policy file") {
+		t.Errorf("expected error to contain 'stat policy file', got %q", err.Error())
+	}
+}
