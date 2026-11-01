@@ -4,11 +4,11 @@ import rego.v1
 
 # Helper function to detect delete operations
 is_delete(rc) if {
-	"delete" in rc.change.actions
+	rc.change.actions == ["delete"]
 }
 
 is_delete(rc) if {
-	"delete" in rc.actions
+	rc.actions == ["delete"]
 }
 
 # AWS S3: Require server-side encryption configuration with KMS or AES256

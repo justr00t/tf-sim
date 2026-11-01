@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -389,5 +390,77 @@ func TestParsePlanReader_NonObjectRoot(t *testing.T) {
 	_, err := p.ParsePlanReader(ctx, strings.NewReader(nonObject), "test-repo", "array.json")
 	if err == nil {
 		t.Fatal("expected error for non-object JSON root, got nil")
+	}
+}
+
+func TestParsePlanReader_ReplaceAndDeleteActions(t *testing.T) {
+	ctx := context.Background()
+	p := NewParser()
+
+	input := `{
+		"terraform_version": "1.9.0",
+		"resource_changes": [
+			{
+				"address": "aws_s3_bucket.replace_default",
+				"type": "aws_s3_bucket",
+				"name": "replace_default",
+				"provider_name": "registry.terraform.io/hashicorp/aws",
+				"change": {
+					"actions": ["delete", "create"],
+					"before": {"bucket": "old-bucket"},
+					"after": {"bucket": "new-bucket"}
+				}
+			},
+			{
+				"address": "azurerm_storage_account.replace_cbd",
+				"type": "azurerm_storage_account",
+				"name": "replace_cbd",
+				"provider_name": "registry.terraform.io/hashicorp/azurerm",
+				"change": {
+					"actions": ["create", "delete"],
+					"before": {"name": "oldstorage"},
+					"after": {"name": "newstorage"}
+				}
+			},
+			{
+				"address": "google_storage_bucket.pure_delete",
+				"type": "google_storage_bucket",
+				"name": "pure_delete",
+				"provider_name": "registry.terraform.io/hashicorp/google",
+				"change": {
+					"actions": ["delete"],
+					"before": {"name": "deleted-bucket"},
+					"after": null
+				}
+			}
+		]
+	}`
+
+	snapshot, err := p.ParsePlanReader(ctx, strings.NewReader(input), "replace-repo", "replace.json")
+	if err != nil {
+		t.Fatalf("unexpected error parsing plan with replace and delete actions: %v", err)
+	}
+
+	if len(snapshot.ResourceChanges) != 3 {
+		t.Fatalf("expected all 3 resources to be retained, got %d", len(snapshot.ResourceChanges))
+	}
+
+	expected := []struct {
+		address string
+		actions []string
+	}{
+		{address: "aws_s3_bucket.replace_default", actions: []string{"delete", "create"}},
+		{address: "azurerm_storage_account.replace_cbd", actions: []string{"create", "delete"}},
+		{address: "google_storage_bucket.pure_delete", actions: []string{"delete"}},
+	}
+
+	for i, exp := range expected {
+		rc := snapshot.ResourceChanges[i]
+		if rc.Address != exp.address {
+			t.Errorf("resource[%d] expected address %q, got %q", i, exp.address, rc.Address)
+		}
+		if !reflect.DeepEqual(rc.Actions, exp.actions) {
+			t.Errorf("resource[%d] (%s) expected actions %v, got %v", i, exp.address, exp.actions, rc.Actions)
+		}
 	}
 }
