@@ -791,3 +791,750 @@ func TestApplyPatches_PathTraversalAndSymlinkProtection(t *testing.T) {
 		}
 	})
 }
+
+// TestParseResourceAddress_TableDriven verifies bracket- and quote-aware Terraform address parsing across root, count, for_each, module, and data addresses.
+func TestParseResourceAddress_TableDriven(t *testing.T) {
+	tests := []struct {
+		name      string
+		addr      string
+		wantChain []string
+		wantType  string
+		wantName  string
+	}{
+		{
+			name:      "SimpleRootAddress",
+			addr:      "aws_s3_bucket.logs",
+			wantChain: nil,
+			wantType:  "aws_s3_bucket",
+			wantName:  "logs",
+		},
+		{
+			name:      "CountIndexedAddress",
+			addr:      "aws_s3_bucket.logs[0]",
+			wantChain: nil,
+			wantType:  "aws_s3_bucket",
+			wantName:  "logs",
+		},
+		{
+			name:      "SimpleForEachAddress",
+			addr:      `aws_s3_bucket.logs["prod"]`,
+			wantChain: nil,
+			wantType:  "aws_s3_bucket",
+			wantName:  "logs",
+		},
+		{
+			name:      "ForEachWithDotsAndSlashes",
+			addr:      `aws_s3_bucket.logs["us-east-1.prod/2026"]`,
+			wantChain: nil,
+			wantType:  "aws_s3_bucket",
+			wantName:  "logs",
+		},
+		{
+			name:      "SingleModuleAddress",
+			addr:      "module.alpha.aws_s3_bucket.this",
+			wantChain: []string{"alpha"},
+			wantType:  "aws_s3_bucket",
+			wantName:  "this",
+		},
+		{
+			name:      "IndexedNestedModulesAddress",
+			addr:      `module.parent["region.1"].module.child[2].aws_s3_bucket.this["env.prod"]`,
+			wantChain: []string{"parent", "child"},
+			wantType:  "aws_s3_bucket",
+			wantName:  "this",
+		},
+		{
+			name:      "DataSourceInModuleIndexed",
+			addr:      "module.alpha.data.aws_iam_policy_document.doc[0]",
+			wantChain: []string{"alpha"},
+			wantType:  "aws_iam_policy_document",
+			wantName:  "doc",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotChain, gotType, gotName := parseResourceAddress(tc.addr)
+			if len(gotChain) != len(tc.wantChain) {
+				t.Fatalf("parseResourceAddress(%q) moduleChain = %v, want %v", tc.addr, gotChain, tc.wantChain)
+			}
+			for i := range gotChain {
+				if gotChain[i] != tc.wantChain[i] {
+					t.Errorf("parseResourceAddress(%q) moduleChain[%d] = %q, want %q", tc.addr, i, gotChain[i], tc.wantChain[i])
+				}
+			}
+			if gotType != tc.wantType {
+				t.Errorf("parseResourceAddress(%q) resType = %q, want %q", tc.addr, gotType, tc.wantType)
+			}
+			if gotName != tc.wantName {
+				t.Errorf("parseResourceAddress(%q) resName = %q, want %q", tc.addr, gotName, tc.wantName)
+			}
+		})
+	}
+}
+
+// TestGeneratePatches_CountAndForEachResources verifies that count and for_each resource blocks are matched and remediated while preserving count/for_each expressions.
+func TestGeneratePatches_CountAndForEachResources(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	hclContent := `resource "aws_s3_bucket" "logs" {
+  count  = 2
+  bucket = "company-logs-${count.index}"
+}
+
+resource "azurerm_storage_account" "regional" {
+  for_each                   = toset(["east.us", "west.us"])
+  name                       = "regionalacct"
+  https_traffic_only_enabled = false
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(hclContent), 0o600); err != nil {
+		t.Fatalf("failed to write main.tf: %v", err)
+	}
+
+	violations := []model.PolicyViolation{
+		{
+			RuleID:          "AWS-S3-ENCRYPT-001",
+			Severity:        "HIGH",
+			ResourceAddress: "aws_s3_bucket.logs[0]",
+			ResourceType:    "aws_s3_bucket",
+			ResourceName:    "logs[0]",
+			Remediation: &model.RemediationSpec{
+				AttributePath: []string{
+					"server_side_encryption_configuration",
+					"rule",
+					"apply_server_side_encryption_by_default",
+					"sse_algorithm",
+				},
+				SuggestedVal: "aws:kms",
+			},
+		},
+		{
+			RuleID:          "AZURE-STORAGE-HTTPS-001",
+			Severity:        "HIGH",
+			ResourceAddress: `azurerm_storage_account.regional["east.us"]`,
+			ResourceType:    "",
+			ResourceName:    "",
+			Remediation: &model.RemediationSpec{
+				AttributePath: []string{"https_traffic_only_enabled"},
+				SuggestedVal:  true,
+			},
+		},
+	}
+
+	patcher := NewPatcher()
+	patches, err := patcher.GeneratePatches(ctx, tmpDir, violations)
+	if err != nil {
+		t.Fatalf("GeneratePatches failed: %v", err)
+	}
+	if len(patches) != 2 {
+		t.Fatalf("expected 2 patches, got %d", len(patches))
+	}
+
+	finalHCL := patches[1].PatchedHCL
+	for _, want := range []string{
+		"count  = 2",
+		`for_each                   = toset(["east.us", "west.us"])`,
+		`sse_algorithm = "aws:kms"`,
+		"https_traffic_only_enabled = true",
+	} {
+		if !strings.Contains(finalHCL, want) {
+			t.Errorf("expected PatchedHCL to contain %q, got:\n%s", want, finalHCL)
+		}
+	}
+
+	for i, p := range patches {
+		if !strings.Contains(p.UnifiedDiff, "--- a/main.tf") || !strings.Contains(p.UnifiedDiff, "+++ b/main.tf") {
+			t.Errorf("patch[%d] missing unified diff headers:\n%s", i, p.UnifiedDiff)
+		}
+		_, diags := hclwrite.ParseConfig([]byte(p.PatchedHCL), "main.tf", hcl.Pos{Line: 1, Column: 1})
+		if diags.HasErrors() {
+			t.Errorf("patch[%d] produced invalid HCL: %s", i, diags.Error())
+		}
+	}
+}
+
+// TestGeneratePatches_MultipleModuleDisambiguation verifies that a module-scoped violation patches only the targeted child module when multiple modules define the same resource type and name.
+func TestGeneratePatches_MultipleModuleDisambiguation(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	rootHCL := `module "alpha" {
+  source = "./modules/alpha"
+}
+
+module "beta" {
+  source = "./modules/beta"
+}
+
+resource "aws_s3_bucket" "this" {
+  bucket = "root-bucket"
+}
+`
+	alphaHCL := `resource "aws_s3_bucket" "this" {
+  bucket = "alpha-bucket"
+}
+`
+	betaHCL := `resource "aws_s3_bucket" "this" {
+  for_each = toset(["logs.prod", "logs.dev"])
+  bucket   = "beta-${each.key}"
+}
+`
+
+	alphaDir := filepath.Join(tmpDir, "modules", "alpha")
+	betaDir := filepath.Join(tmpDir, "modules", "beta")
+	if err := os.MkdirAll(alphaDir, 0o755); err != nil {
+		t.Fatalf("failed to mkdir alphaDir: %v", err)
+	}
+	if err := os.MkdirAll(betaDir, 0o755); err != nil {
+		t.Fatalf("failed to mkdir betaDir: %v", err)
+	}
+
+	rootFile := filepath.Join(tmpDir, "main.tf")
+	alphaFile := filepath.Join(alphaDir, "main.tf")
+	betaFile := filepath.Join(betaDir, "main.tf")
+
+	if err := os.WriteFile(rootFile, []byte(rootHCL), 0o600); err != nil {
+		t.Fatalf("failed to write root main.tf: %v", err)
+	}
+	if err := os.WriteFile(alphaFile, []byte(alphaHCL), 0o600); err != nil {
+		t.Fatalf("failed to write alpha main.tf: %v", err)
+	}
+	if err := os.WriteFile(betaFile, []byte(betaHCL), 0o600); err != nil {
+		t.Fatalf("failed to write beta main.tf: %v", err)
+	}
+
+	v := model.PolicyViolation{
+		RuleID:          "AWS-S3-ENCRYPT-001",
+		Severity:        "HIGH",
+		ResourceAddress: `module.beta.aws_s3_bucket.this["logs.prod"]`,
+		ResourceType:    "aws_s3_bucket",
+		ResourceName:    `this["logs.prod"]`,
+		Remediation: &model.RemediationSpec{
+			AttributePath: []string{
+				"server_side_encryption_configuration",
+				"rule",
+				"apply_server_side_encryption_by_default",
+				"sse_algorithm",
+			},
+			SuggestedVal: "aws:kms",
+		},
+	}
+
+	patcher := NewPatcher(WithWriteChanges(true))
+	patches, err := patcher.GeneratePatches(ctx, tmpDir, []model.PolicyViolation{v})
+	if err != nil {
+		t.Fatalf("GeneratePatches failed: %v", err)
+	}
+	if len(patches) != 1 {
+		t.Fatalf("expected 1 patch, got %d", len(patches))
+	}
+	if patches[0].FilePath != "modules/beta/main.tf" {
+		t.Errorf("expected FilePath == \"modules/beta/main.tf\", got %q", patches[0].FilePath)
+	}
+
+	gotRoot, err := os.ReadFile(rootFile)
+	if err != nil {
+		t.Fatalf("failed to read root main.tf: %v", err)
+	}
+	if string(gotRoot) != rootHCL {
+		t.Errorf("expected root main.tf to remain untouched, got:\n%s", string(gotRoot))
+	}
+
+	gotAlpha, err := os.ReadFile(alphaFile)
+	if err != nil {
+		t.Fatalf("failed to read alpha main.tf: %v", err)
+	}
+	if string(gotAlpha) != alphaHCL {
+		t.Errorf("expected modules/alpha/main.tf to remain untouched, got:\n%s", string(gotAlpha))
+	}
+
+	gotBeta, err := os.ReadFile(betaFile)
+	if err != nil {
+		t.Fatalf("failed to read beta main.tf: %v", err)
+	}
+	if !strings.Contains(string(gotBeta), `sse_algorithm = "aws:kms"`) {
+		t.Errorf("expected modules/beta/main.tf to be remediated, got:\n%s", string(gotBeta))
+	}
+}
+
+// TestGeneratePatches_NestedAndSiblingModules verifies multi-hop module resolution across nested and sibling (../) local module sources.
+func TestGeneratePatches_NestedAndSiblingModules(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	rootHCL := `module "parent" {
+  for_each = toset(["team.a", "team.b"])
+  source   = "./modules/parent"
+}
+`
+	parentHCL := `module "child" {
+  count  = 1
+  source = "../shared_child"
+}
+`
+	childHCL := `resource "azurerm_storage_account" "this" {
+  name                       = "sharedchildacct"
+  https_traffic_only_enabled = false
+}
+`
+
+	parentDir := filepath.Join(tmpDir, "modules", "parent")
+	childDir := filepath.Join(tmpDir, "modules", "shared_child")
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		t.Fatalf("failed to mkdir parentDir: %v", err)
+	}
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatalf("failed to mkdir childDir: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(rootHCL), 0o600); err != nil {
+		t.Fatalf("failed to write root main.tf: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(parentDir, "main.tf"), []byte(parentHCL), 0o600); err != nil {
+		t.Fatalf("failed to write parent main.tf: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(childDir, "storage.tf"), []byte(childHCL), 0o600); err != nil {
+		t.Fatalf("failed to write child storage.tf: %v", err)
+	}
+
+	v := model.PolicyViolation{
+		RuleID:          "AZURE-STORAGE-HTTPS-001",
+		Severity:        "HIGH",
+		ResourceAddress: `module.parent["team.a"].module.child[0].azurerm_storage_account.this`,
+		ResourceType:    "azurerm_storage_account",
+		ResourceName:    "this",
+		Remediation: &model.RemediationSpec{
+			AttributePath: []string{"https_traffic_only_enabled"},
+			SuggestedVal:  true,
+		},
+	}
+
+	patches, err := NewPatcher().GeneratePatches(ctx, tmpDir, []model.PolicyViolation{v})
+	if err != nil {
+		t.Fatalf("GeneratePatches failed: %v", err)
+	}
+	if len(patches) != 1 {
+		t.Fatalf("expected 1 patch, got %d", len(patches))
+	}
+	if patches[0].FilePath != "modules/shared_child/storage.tf" {
+		t.Errorf("expected FilePath == \"modules/shared_child/storage.tf\", got %q", patches[0].FilePath)
+	}
+	if !strings.Contains(patches[0].PatchedHCL, "https_traffic_only_enabled = true") {
+		t.Errorf("expected PatchedHCL to contain https_traffic_only_enabled = true, got:\n%s", patches[0].PatchedHCL)
+	}
+}
+
+// TestGeneratePatches_MultipleCountInstancesIdempotent verifies that multiple violations for distinct instances of the same count resource do not duplicate nested blocks.
+func TestGeneratePatches_MultipleCountInstancesIdempotent(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	initialHCL := `resource "aws_s3_bucket" "logs" {
+  count  = 2
+  bucket = "audit-logs-${count.index}"
+}
+`
+	tfFile := filepath.Join(tmpDir, "main.tf")
+	if err := os.WriteFile(tfFile, []byte(initialHCL), 0o600); err != nil {
+		t.Fatalf("failed to write main.tf: %v", err)
+	}
+
+	spec := &model.RemediationSpec{
+		AttributePath: []string{
+			"server_side_encryption_configuration",
+			"rule",
+			"apply_server_side_encryption_by_default",
+			"sse_algorithm",
+		},
+		SuggestedVal: "aws:kms",
+	}
+
+	violations := []model.PolicyViolation{
+		{
+			RuleID:          "AWS-S3-ENCRYPT-001",
+			Severity:        "HIGH",
+			ResourceAddress: "aws_s3_bucket.logs[0]",
+			ResourceType:    "aws_s3_bucket",
+			ResourceName:    "logs",
+			Remediation:     spec,
+		},
+		{
+			RuleID:          "AWS-S3-ENCRYPT-001",
+			Severity:        "HIGH",
+			ResourceAddress: "aws_s3_bucket.logs[1]",
+			ResourceType:    "aws_s3_bucket",
+			ResourceName:    "logs",
+			Remediation:     spec,
+		},
+	}
+
+	patcher := NewPatcher(WithWriteChanges(true))
+	patches, err := patcher.GeneratePatches(ctx, tmpDir, violations)
+	if err != nil {
+		t.Fatalf("GeneratePatches failed: %v", err)
+	}
+	if len(patches) != 2 {
+		t.Fatalf("expected 2 patches, got %d", len(patches))
+	}
+
+	diskBytes, err := os.ReadFile(tfFile)
+	if err != nil {
+		t.Fatalf("failed to read main.tf from disk: %v", err)
+	}
+	diskStr := string(diskBytes)
+
+	if count := strings.Count(diskStr, "server_side_encryption_configuration"); count != 1 {
+		t.Errorf("expected exactly 1 server_side_encryption_configuration block on disk, got %d in:\n%s", count, diskStr)
+	}
+	if count := strings.Count(diskStr, `sse_algorithm = "aws:kms"`); count != 1 {
+		t.Errorf("expected exactly 1 sse_algorithm attribute on disk, got %d in:\n%s", count, diskStr)
+	}
+
+	_, diags := hclwrite.ParseConfig(diskBytes, "main.tf", hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() {
+		t.Errorf("patched main.tf on disk failed HCL parsing: %s", diags.Error())
+	}
+}
+
+// TestGeneratePatches_ForEachEscapedQuotesAndBracketsInKey verifies that escaped quotes and brackets inside for_each keys do not cause premature dot-splitting.
+func TestGeneratePatches_ForEachEscapedQuotesAndBracketsInKey(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	rootHCL := `module "app" {
+  source = "./modules/app"
+}
+`
+	appHCL := `resource "aws_s3_bucket" "logs" {
+  bucket = "app-logs"
+}
+`
+	appDir := filepath.Join(tmpDir, "modules", "app")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatalf("failed to mkdir appDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(rootHCL), 0o600); err != nil {
+		t.Fatalf("failed to write root main.tf: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "main.tf"), []byte(appHCL), 0o600); err != nil {
+		t.Fatalf("failed to write app main.tf: %v", err)
+	}
+
+	addr := `module.app["team.\"alpha\".1"].aws_s3_bucket.logs["path[0].prod"]`
+	v := model.PolicyViolation{
+		RuleID:          "AWS-S3-ENCRYPT-001",
+		Severity:        "HIGH",
+		ResourceAddress: addr,
+		Remediation: &model.RemediationSpec{
+			AttributePath: []string{
+				"server_side_encryption_configuration",
+				"rule",
+				"apply_server_side_encryption_by_default",
+				"sse_algorithm",
+			},
+			SuggestedVal: "aws:kms",
+		},
+	}
+
+	patches, err := NewPatcher().GeneratePatches(ctx, tmpDir, []model.PolicyViolation{v})
+	if err != nil {
+		t.Fatalf("GeneratePatches failed: %v", err)
+	}
+	if len(patches) != 1 {
+		t.Fatalf("expected 1 patch, got %d", len(patches))
+	}
+	if patches[0].FilePath != "modules/app/main.tf" {
+		t.Errorf("expected FilePath == \"modules/app/main.tf\", got %q", patches[0].FilePath)
+	}
+}
+
+// TestGeneratePatches_RootViolationDoesNotPatchChildModule verifies that root violations are strictly scoped to root .tf files even when root files sort after child module files.
+func TestGeneratePatches_RootViolationDoesNotPatchChildModule(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	rootHCL := `module "alpha" {
+  source = "./modules/alpha"
+}
+
+resource "aws_s3_bucket" "this" {
+  bucket = "root-bucket"
+}
+`
+	childHCL := `resource "aws_s3_bucket" "this" {
+  bucket = "child-bucket"
+}
+
+resource "aws_s3_bucket" "only_in_child" {
+  bucket = "only-in-child-bucket"
+}
+`
+
+	alphaDir := filepath.Join(tmpDir, "modules", "alpha")
+	if err := os.MkdirAll(alphaDir, 0o755); err != nil {
+		t.Fatalf("failed to mkdir alphaDir: %v", err)
+	}
+
+	rootFile := filepath.Join(tmpDir, "z_main.tf")
+	childFile := filepath.Join(alphaDir, "main.tf")
+	if err := os.WriteFile(rootFile, []byte(rootHCL), 0o600); err != nil {
+		t.Fatalf("failed to write z_main.tf: %v", err)
+	}
+	if err := os.WriteFile(childFile, []byte(childHCL), 0o600); err != nil {
+		t.Fatalf("failed to write modules/alpha/main.tf: %v", err)
+	}
+
+	spec := &model.RemediationSpec{
+		AttributePath: []string{
+			"server_side_encryption_configuration",
+			"rule",
+			"apply_server_side_encryption_by_default",
+			"sse_algorithm",
+		},
+		SuggestedVal: "aws:kms",
+	}
+
+	t.Run("RootViolationPatchesRootZMainNotChildModule", func(t *testing.T) {
+		v := model.PolicyViolation{
+			RuleID:          "AWS-S3-ENCRYPT-001",
+			Severity:        "HIGH",
+			ResourceAddress: "aws_s3_bucket.this",
+			ResourceType:    "aws_s3_bucket",
+			ResourceName:    "this",
+			Remediation:     spec,
+		}
+
+		patches, err := NewPatcher().GeneratePatches(ctx, tmpDir, []model.PolicyViolation{v})
+		if err != nil {
+			t.Fatalf("GeneratePatches failed: %v", err)
+		}
+		if len(patches) != 1 {
+			t.Fatalf("expected 1 patch, got %d", len(patches))
+		}
+		if patches[0].FilePath != "z_main.tf" {
+			t.Errorf("expected FilePath == \"z_main.tf\", got %q", patches[0].FilePath)
+		}
+	})
+
+	t.Run("RootViolationForChildOnlyResourceProducesZeroPatches", func(t *testing.T) {
+		v := model.PolicyViolation{
+			RuleID:          "AWS-S3-ENCRYPT-001",
+			Severity:        "HIGH",
+			ResourceAddress: "aws_s3_bucket.only_in_child",
+			ResourceType:    "aws_s3_bucket",
+			ResourceName:    "only_in_child",
+			Remediation:     spec,
+		}
+
+		patches, err := NewPatcher(WithWriteChanges(true)).GeneratePatches(ctx, tmpDir, []model.PolicyViolation{v})
+		if err != nil {
+			t.Fatalf("GeneratePatches failed: %v", err)
+		}
+		if len(patches) != 0 {
+			t.Fatalf("expected 0 patches when root violation resource only exists in child module, got %d", len(patches))
+		}
+
+		gotChild, err := os.ReadFile(childFile)
+		if err != nil {
+			t.Fatalf("failed to read child main.tf: %v", err)
+		}
+		if string(gotChild) != childHCL {
+			t.Errorf("expected modules/alpha/main.tf to remain unmodified, got:\n%s", string(gotChild))
+		}
+	})
+}
+
+// TestGeneratePatches_ConventionalModulesDirFallback verifies fallback to ./modules/<modName> when no explicit module block exists in the parent directory.
+func TestGeneratePatches_ConventionalModulesDirFallback(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	rootHCL := `# Root main.tf without explicit module "network" block
+resource "azurerm_storage_account" "this" {
+  name                       = "rootacct"
+  https_traffic_only_enabled = false
+}
+`
+	networkHCL := `resource "azurerm_storage_account" "this" {
+  name                       = "networkacct"
+  https_traffic_only_enabled = false
+}
+`
+
+	networkDir := filepath.Join(tmpDir, "modules", "network")
+	if err := os.MkdirAll(networkDir, 0o755); err != nil {
+		t.Fatalf("failed to mkdir networkDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(rootHCL), 0o600); err != nil {
+		t.Fatalf("failed to write root main.tf: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(networkDir, "main.tf"), []byte(networkHCL), 0o600); err != nil {
+		t.Fatalf("failed to write network main.tf: %v", err)
+	}
+
+	v := model.PolicyViolation{
+		RuleID:          "AZURE-STORAGE-HTTPS-001",
+		Severity:        "HIGH",
+		ResourceAddress: "module.network.azurerm_storage_account.this",
+		ResourceType:    "azurerm_storage_account",
+		ResourceName:    "this",
+		Remediation: &model.RemediationSpec{
+			AttributePath: []string{"https_traffic_only_enabled"},
+			SuggestedVal:  true,
+		},
+	}
+
+	patches, err := NewPatcher().GeneratePatches(ctx, tmpDir, []model.PolicyViolation{v})
+	if err != nil {
+		t.Fatalf("GeneratePatches failed: %v", err)
+	}
+	if len(patches) != 1 {
+		t.Fatalf("expected 1 patch, got %d", len(patches))
+	}
+	if patches[0].FilePath != "modules/network/main.tf" {
+		t.Errorf("expected FilePath == \"modules/network/main.tf\", got %q", patches[0].FilePath)
+	}
+}
+
+// TestGeneratePatches_ModuleSourcePathTraversalBlocked verifies that a module source escaping tfDir is blocked without falling back to patching root .tf files.
+func TestGeneratePatches_ModuleSourcePathTraversalBlocked(t *testing.T) {
+	ctx := context.Background()
+	parentDir := t.TempDir()
+
+	outsideDir := filepath.Join(parentDir, "outside")
+	repoDir := filepath.Join(parentDir, "repo")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("failed to mkdir outsideDir: %v", err)
+	}
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("failed to mkdir repoDir: %v", err)
+	}
+
+	outsideHCL := `resource "aws_s3_bucket" "this" {
+  bucket = "outside-bucket"
+}
+`
+	repoHCL := `module "escaped" {
+  source = "../outside"
+}
+
+resource "aws_s3_bucket" "this" {
+  bucket = "repo-root-bucket"
+}
+`
+
+	outsideFile := filepath.Join(outsideDir, "main.tf")
+	repoFile := filepath.Join(repoDir, "main.tf")
+	if err := os.WriteFile(outsideFile, []byte(outsideHCL), 0o600); err != nil {
+		t.Fatalf("failed to write outside main.tf: %v", err)
+	}
+	if err := os.WriteFile(repoFile, []byte(repoHCL), 0o600); err != nil {
+		t.Fatalf("failed to write repo main.tf: %v", err)
+	}
+
+	v := model.PolicyViolation{
+		RuleID:          "AWS-S3-ENCRYPT-001",
+		Severity:        "HIGH",
+		ResourceAddress: "module.escaped.aws_s3_bucket.this",
+		ResourceType:    "aws_s3_bucket",
+		ResourceName:    "this",
+		Remediation: &model.RemediationSpec{
+			AttributePath: []string{
+				"server_side_encryption_configuration",
+				"rule",
+				"apply_server_side_encryption_by_default",
+				"sse_algorithm",
+			},
+			SuggestedVal: "aws:kms",
+		},
+	}
+
+	patches, err := NewPatcher(WithWriteChanges(true)).GeneratePatches(ctx, repoDir, []model.PolicyViolation{v})
+	if err != nil {
+		t.Fatalf("GeneratePatches failed: %v", err)
+	}
+	if len(patches) != 0 {
+		t.Fatalf("expected 0 patches when module source escapes tfDir, got %d", len(patches))
+	}
+
+	gotOutside, err := os.ReadFile(outsideFile)
+	if err != nil {
+		t.Fatalf("failed to read outside main.tf: %v", err)
+	}
+	if string(gotOutside) != outsideHCL {
+		t.Errorf("outside main.tf was modified! got:\n%s", string(gotOutside))
+	}
+
+	gotRepo, err := os.ReadFile(repoFile)
+	if err != nil {
+		t.Fatalf("failed to read repo main.tf: %v", err)
+	}
+	if string(gotRepo) != repoHCL {
+		t.Errorf("repo main.tf was modified via fallback! got:\n%s", string(gotRepo))
+	}
+}
+
+// TestResolveResourceTypeAndName_MalformedAddresses ensures malformed or partial addresses never panic and return safe values.
+func TestResolveResourceTypeAndName_MalformedAddresses(t *testing.T) {
+	tests := []struct {
+		name      string
+		violation model.PolicyViolation
+		wantType  string
+		wantName  string
+	}{
+		{
+			name:      "EmptyAddress",
+			violation: model.PolicyViolation{ResourceAddress: ""},
+			wantType:  "",
+			wantName:  "",
+		},
+		{
+			name:      "WhitespaceOnlyAddress",
+			violation: model.PolicyViolation{ResourceAddress: "   "},
+			wantType:  "",
+			wantName:  "",
+		},
+		{
+			name:      "SingleSegment",
+			violation: model.PolicyViolation{ResourceAddress: "aws_s3_bucket"},
+			wantType:  "",
+			wantName:  "",
+		},
+		{
+			name:      "UnclosedQuoteAndBracket",
+			violation: model.PolicyViolation{ResourceAddress: `aws_s3_bucket.logs["unclosed`},
+			wantType:  "aws_s3_bucket",
+			wantName:  "logs",
+		},
+		{
+			name:      "BareModulePrefixOnly",
+			violation: model.PolicyViolation{ResourceAddress: "module.only"},
+			wantType:  "",
+			wantName:  "",
+		},
+		{
+			name:      "TrailingDot",
+			violation: model.PolicyViolation{ResourceAddress: "aws_s3_bucket."},
+			wantType:  "aws_s3_bucket",
+			wantName:  "",
+		},
+		{
+			name:      "OnlyIndexBrackets",
+			violation: model.PolicyViolation{ResourceAddress: "[0].[1]"},
+			wantType:  "",
+			wantName:  "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotType, gotName := resolveResourceTypeAndName(tc.violation)
+			if gotType != tc.wantType || gotName != tc.wantName {
+				t.Errorf("resolveResourceTypeAndName(%+v) = (%q, %q), want (%q, %q)",
+					tc.violation, gotType, gotName, tc.wantType, tc.wantName)
+			}
+		})
+	}
+}

@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/justr00t/tf-sim/internal/model"
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -84,10 +87,11 @@ func (p *Patcher) GeneratePatches(ctx context.Context, tfDir string, violations 
 
 	// Validate candidate violations upfront so invalid attribute paths or unsupported SuggestedVal types fail fast.
 	type actionableViolation struct {
-		violation model.PolicyViolation
-		resType   string
-		resName   string
-		ctyVal    cty.Value
+		violation   model.PolicyViolation
+		moduleChain []string
+		resType     string
+		resName     string
+		ctyVal      cty.Value
 	}
 
 	var actionable []actionableViolation
@@ -104,15 +108,17 @@ func (p *Patcher) GeneratePatches(ctx context.Context, tfDir string, violations 
 		if err != nil {
 			return nil, fmt.Errorf("converting remediation value for resource %q: %w", v.ResourceAddress, err)
 		}
+		moduleChain, _, _ := parseResourceAddress(v.ResourceAddress)
 		resType, resName := resolveResourceTypeAndName(v)
 		if resType == "" || resName == "" {
 			continue
 		}
 		actionable = append(actionable, actionableViolation{
-			violation: v,
-			resType:   resType,
-			resName:   resName,
-			ctyVal:    ctyVal,
+			violation:   v,
+			moduleChain: moduleChain,
+			resType:     resType,
+			resName:     resName,
+			ctyVal:      ctyVal,
 		})
 	}
 
@@ -190,13 +196,25 @@ func (p *Patcher) GeneratePatches(ctx context.Context, tfDir string, violations 
 		})
 	}
 
+	filesByDir := make(map[string][]*parsedTFFile)
+	for _, pf := range parsedFiles {
+		dirKey := path.Clean(path.Dir(pf.relPath))
+		filesByDir[dirKey] = append(filesByDir[dirKey], pf)
+	}
+
 	patches := make([]model.RemediationPatch, 0, len(actionable))
 	for _, av := range actionable {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
-		for _, pf := range parsedFiles {
+		targetDir, resolved := resolveTargetModuleDir(absDir, filesByDir, av.moduleChain)
+		candidateFiles := parsedFiles
+		if resolved {
+			candidateFiles = filesByDir[targetDir]
+		}
+
+		for _, pf := range candidateFiles {
 			block := findResourceBlock(pf.hclFile.Body(), av.resType, av.resName)
 			if block == nil {
 				continue
@@ -333,30 +351,275 @@ func (p *Patcher) ApplyPatches(ctx context.Context, tfDir string, patches []mode
 	return nil
 }
 
-// resolveResourceTypeAndName extracts the resource type and resource name from a PolicyViolation,
-// falling back to the last two dot-separated segments of ResourceAddress when needed.
+// resolveResourceTypeAndName extracts the normalized resource type and resource name from a PolicyViolation,
+// stripping any count/for_each index suffixes (e.g. [0], ["prod"]) and falling back to ResourceAddress.
 func resolveResourceTypeAndName(v model.PolicyViolation) (string, string) {
-	resType := strings.TrimSpace(v.ResourceType)
-	resName := strings.TrimSpace(v.ResourceName)
+	resType := stripIndexSuffix(v.ResourceType)
+	resName := stripIndexSuffix(v.ResourceName)
 	if resType != "" && resName != "" {
 		return resType, resName
 	}
 
-	addr := strings.TrimSpace(v.ResourceAddress)
-	if addr == "" {
-		return resType, resName
+	_, parsedType, parsedName := parseResourceAddress(v.ResourceAddress)
+	if resType == "" {
+		resType = parsedType
 	}
-
-	parts := strings.Split(addr, ".")
-	if len(parts) >= 2 {
-		if resType == "" {
-			resType = strings.TrimSpace(parts[len(parts)-2])
-		}
-		if resName == "" {
-			resName = strings.TrimSpace(parts[len(parts)-1])
-		}
+	if resName == "" {
+		resName = parsedName
 	}
 	return resType, resName
+}
+
+// parseResourceAddress parses a Terraform resource address into its normalized module chain,
+// resource type, and resource name, stripping count/for_each index suffixes from each segment.
+func parseResourceAddress(addr string) (moduleChain []string, resType string, resName string) {
+	segments := splitAddressSegments(addr)
+	if len(segments) == 0 {
+		return nil, "", ""
+	}
+
+	i := 0
+	for i+1 < len(segments) && stripIndexSuffix(segments[i]) == "module" {
+		modName := stripIndexSuffix(segments[i+1])
+		if modName != "" {
+			moduleChain = append(moduleChain, modName)
+		}
+		i += 2
+	}
+
+	remaining := segments[i:]
+	if len(remaining) >= 3 && stripIndexSuffix(remaining[0]) == "data" {
+		remaining = remaining[1:]
+	}
+	if len(remaining) >= 2 {
+		resType = stripIndexSuffix(remaining[len(remaining)-2])
+		resName = stripIndexSuffix(remaining[len(remaining)-1])
+	}
+	return moduleChain, resType, resName
+}
+
+// splitAddressSegments splits a Terraform address on '.' only when outside brackets [...] and quotes "...".
+func splitAddressSegments(addr string) []string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return nil
+	}
+
+	var segments []string
+	inQuotes := false
+	escaped := false
+	bracketDepth := 0
+	start := 0
+
+	for i := 0; i < len(addr); i++ {
+		ch := addr[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inQuotes {
+			if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inQuotes = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '"':
+			inQuotes = true
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '.':
+			if bracketDepth == 0 {
+				segments = append(segments, strings.TrimSpace(addr[start:i]))
+				start = i + 1
+			}
+		}
+	}
+
+	segments = append(segments, strings.TrimSpace(addr[start:]))
+	return segments
+}
+
+// stripIndexSuffix removes any trailing count or for_each index suffix (e.g. [0], ["key"]) from an address segment.
+func stripIndexSuffix(segment string) string {
+	s := strings.TrimSpace(segment)
+	if idx := strings.IndexByte(s, '['); idx >= 0 {
+		return strings.TrimSpace(s[:idx])
+	}
+	return s
+}
+
+// resolveTargetModuleDir resolves a module chain step-by-step starting from "." within absRoot.
+// When resolved is true, callers must restrict searching to filesByDir[targetDir] (which is empty if blocked).
+// When resolved is false, the module chain could not be mapped to a subdirectory in tfDir and callers may fall back to all parsedFiles.
+func resolveTargetModuleDir(absRoot string, filesByDir map[string][]*parsedTFFile, moduleChain []string) (string, bool) {
+	absRoot = filepath.Clean(absRoot)
+	if len(moduleChain) == 0 {
+		if len(filesByDir["."]) > 0 {
+			return ".", true
+		}
+		return "", false
+	}
+
+	currDir := "."
+	for _, rawMod := range moduleChain {
+		modName := stripIndexSuffix(rawMod)
+		if modName == "" {
+			return "", false
+		}
+
+		var rawSource string
+		for _, pf := range filesByDir[currDir] {
+			sources := extractModuleSources(pf.hclFile.Body())
+			if src, ok := sources[modName]; ok && src != "" {
+				rawSource = src
+				break
+			}
+		}
+
+		nextDir := ""
+		if rawSource != "" {
+			candRel, escaped, ok := resolveLocalModuleDir(absRoot, currDir, rawSource)
+			if escaped {
+				return "", true
+			}
+			if ok && len(filesByDir[candRel]) > 0 {
+				nextDir = candRel
+			}
+		}
+
+		if nextDir == "" && rawSource == "" {
+			convSource := "./" + path.Join("modules", modName)
+			candRel, escaped, ok := resolveLocalModuleDir(absRoot, currDir, convSource)
+			if escaped {
+				return "", true
+			}
+			if ok && len(filesByDir[candRel]) > 0 {
+				nextDir = candRel
+			}
+		}
+
+		if nextDir == "" {
+			return "", false
+		}
+		currDir = nextDir
+	}
+
+	return currDir, true
+}
+
+// resolveLocalModuleDir resolves a module source path relative to currDir inside absRoot,
+// enforcing strict containment within absRoot.
+func resolveLocalModuleDir(absRoot, currDir, rawSource string) (relDir string, escaped bool, ok bool) {
+	rawSource = strings.TrimSpace(rawSource)
+	if rawSource == "" {
+		return "", false, false
+	}
+	if strings.Contains(rawSource, "://") || strings.Contains(rawSource, "::") {
+		return "", false, false
+	}
+	if filepath.IsAbs(rawSource) || strings.HasPrefix(rawSource, "/") || strings.HasPrefix(rawSource, `\`) {
+		return "", true, false
+	}
+
+	srcSlash := filepath.ToSlash(rawSource)
+	isExplicitRelative := strings.HasPrefix(srcSlash, "./") || strings.HasPrefix(srcSlash, "../") || srcSlash == "." || srcSlash == ".."
+
+	currAbs := filepath.Join(absRoot, filepath.FromSlash(currDir))
+	candAbs := filepath.Clean(filepath.Join(currAbs, filepath.FromSlash(srcSlash)))
+
+	rel, err := filepath.Rel(absRoot, candAbs)
+	if err != nil {
+		return "", true, false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", true, false
+	}
+
+	if !isExplicitRelative {
+		return "", false, false
+	}
+
+	return path.Clean(filepath.ToSlash(rel)), false, true
+}
+
+// extractModuleSources scans top-level `module "<label>"` blocks in body and returns a map of
+// normalized module label -> static string value of the `source` attribute.
+func extractModuleSources(body *hclwrite.Body) map[string]string {
+	if body == nil {
+		return nil
+	}
+	var sources map[string]string
+	for _, block := range body.Blocks() {
+		if block.Type() != "module" {
+			continue
+		}
+		labels := block.Labels()
+		if len(labels) != 1 {
+			continue
+		}
+		modName := stripIndexSuffix(labels[0])
+		if modName == "" {
+			continue
+		}
+		srcAttr := block.Body().GetAttribute("source")
+		if srcAttr == nil {
+			continue
+		}
+		src := extractStaticStringAttr(srcAttr)
+		if src == "" {
+			continue
+		}
+		if sources == nil {
+			sources = make(map[string]string)
+		}
+		sources[modName] = src
+	}
+	return sources
+}
+
+// extractStaticStringAttr extracts the literal string value from an HCL attribute if and only if
+// the expression is a static quoted string literal without template interpolation.
+func extractStaticStringAttr(attr *hclwrite.Attribute) string {
+	if attr == nil {
+		return ""
+	}
+	tokens := attr.Expr().BuildTokens(nil)
+	inQuote := false
+	var b strings.Builder
+	for _, tok := range tokens {
+		switch tok.Type {
+		case hclsyntax.TokenOQuote:
+			if inQuote {
+				return ""
+			}
+			inQuote = true
+		case hclsyntax.TokenQuotedLit:
+			if !inQuote {
+				return ""
+			}
+			b.Write(tok.Bytes)
+		case hclsyntax.TokenCQuote:
+			if !inQuote {
+				return ""
+			}
+			raw := b.String()
+			if unquoted, err := strconv.Unquote(`"` + raw + `"`); err == nil {
+				return strings.TrimSpace(unquoted)
+			}
+			return strings.TrimSpace(raw)
+		case hclsyntax.TokenTemplateInterp, hclsyntax.TokenTemplateControl, hclsyntax.TokenTemplateSeqEnd:
+			return ""
+		}
+	}
+	return ""
 }
 
 // findResourceBlock searches the top-level HCL body for `resource "<resType>" "<resName>"`.
