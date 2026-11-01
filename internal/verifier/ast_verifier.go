@@ -167,13 +167,15 @@ func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas 
 			continue
 		}
 
-		localTypes, typeDiags := scanRuleResourceTypes(r, schemas, policyPath)
+		localBindingSets, typeDiags := scanRuleResourceTypes(r, schemas, policyPath)
 		diagnostics = append(diagnostics, typeDiags...)
 
-		ruleBindings[r] = append(ruleBindings[r], localTypes)
+		ruleBindings[r] = append(ruleBindings[r], localBindingSets...)
 
-		// Check for helper rule calls in this rule.
-		propagateHelperCalls(r, localTypes, rulesByName, ruleBindings)
+		// Check for helper rule calls in this rule for each binding set.
+		for _, lt := range localBindingSets {
+			propagateHelperCalls(r, lt, rulesByName, ruleBindings)
+		}
 	}
 
 	// Step 2: Validate each rule against provider schemas.
@@ -181,9 +183,9 @@ func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas 
 		bindingSets := ruleBindings[r]
 		if len(bindingSets) == 0 {
 			// If not called by entrypoint, still scan its own local resource types.
-			localTypes, typeDiags := scanRuleResourceTypes(r, schemas, policyPath)
+			localBindingSets, typeDiags := scanRuleResourceTypes(r, schemas, policyPath)
 			diagnostics = append(diagnostics, typeDiags...)
-			bindingSets = []map[string]string{localTypes}
+			bindingSets = localBindingSets
 		}
 
 		for _, vt := range bindingSets {
@@ -214,10 +216,20 @@ func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas 
 	}, nil
 }
 
-// scanRuleResourceTypes discovers resource types bound in rule expressions (e.g. rc.type == "aws_s3_bucket").
-func scanRuleResourceTypes(r *ast.Rule, schemas model.ProviderSchemaMap, policyPath string) (map[string]string, []model.SchemaDiagnostic) {
-	varTypes := make(map[string]string)
+// scanRuleResourceTypes discovers resource types bound in rule expressions
+// (e.g. rc.type == "aws_s3_bucket" or rc.type in ["aws_s3_bucket", "azurerm_storage_account"]).
+func scanRuleResourceTypes(r *ast.Rule, schemas model.ProviderSchemaMap, policyPath string) ([]map[string]string, []model.SchemaDiagnostic) {
+	varTypeList := make(map[string][]string)
 	var diags []model.SchemaDiagnostic
+
+	addVarType := func(varName, resType string) {
+		for _, existing := range varTypeList[varName] {
+			if existing == resType {
+				return
+			}
+		}
+		varTypeList[varName] = append(varTypeList[varName], resType)
+	}
 
 	for _, expr := range r.Body {
 		terms, ok := expr.Terms.([]*ast.Term)
@@ -243,15 +255,12 @@ func scanRuleResourceTypes(r *ast.Rule, schemas model.ProviderSchemaMap, policyP
 						Severity:     "ERROR",
 					})
 				} else {
-					varTypes[varName] = resType
-					if varName == "input" || strings.HasPrefix(varName, "input.") {
-						varTypes["input"] = resType
-					}
+					addVarType(varName, resType)
 				}
 			}
 		}
 
-		// Case 2: rc.type in ["resource_type"] (internal.member_2)
+		// Case 2: rc.type in ["resource_type", ...] or rc.type in {"resource_type", ...} (internal.member_2)
 		if op == "internal.member_2" && len(terms) == 3 {
 			if ref, ok := terms[1].Value.(ast.Ref); ok && isTypeRef(ref) {
 				varName := getRootVar(ref)
@@ -259,22 +268,32 @@ func scanRuleResourceTypes(r *ast.Rule, schemas model.ProviderSchemaMap, policyP
 				if terms[1].Location != nil {
 					row = terms[1].Location.Row
 				}
-				if arr, ok := terms[2].Value.(*ast.Array); ok {
-					for i := 0; i < arr.Len(); i++ {
-						elem := arr.Elem(i)
-						if str, ok := elem.Value.(ast.String); ok {
-							resType := string(str)
-							if _, ok := schemas[resType]; !ok {
-								diags = append(diags, model.SchemaDiagnostic{
-									PolicyFile:   policyPath,
-									Line:         row,
-									ResourceType: resType,
-									Message:      fmt.Sprintf("Unknown resource type %q in provider schema", resType),
-									Severity:     "ERROR",
-								})
-							} else {
-								varTypes[varName] = resType
-							}
+				var elems []*ast.Term
+				switch col := terms[2].Value.(type) {
+				case *ast.Array:
+					for i := 0; i < col.Len(); i++ {
+						elems = append(elems, col.Elem(i))
+					}
+				case ast.Set:
+					elems = col.Slice()
+				}
+				for _, elem := range elems {
+					if str, ok := elem.Value.(ast.String); ok {
+						resType := string(str)
+						elemRow := row
+						if elem.Location != nil {
+							elemRow = elem.Location.Row
+						}
+						if _, ok := schemas[resType]; !ok {
+							diags = append(diags, model.SchemaDiagnostic{
+								PolicyFile:   policyPath,
+								Line:         elemRow,
+								ResourceType: resType,
+								Message:      fmt.Sprintf("Unknown resource type %q in provider schema", resType),
+								Severity:     "ERROR",
+							})
+						} else {
+							addVarType(varName, resType)
 						}
 					}
 				}
@@ -282,7 +301,37 @@ func scanRuleResourceTypes(r *ast.Rule, schemas model.ProviderSchemaMap, policyP
 		}
 	}
 
-	return varTypes, diags
+	if len(varTypeList) == 0 {
+		return []map[string]string{{}}, diags
+	}
+
+	varNames := make([]string, 0, len(varTypeList))
+	for k := range varTypeList {
+		varNames = append(varNames, k)
+	}
+	sort.Strings(varNames)
+
+	bindingSets := []map[string]string{{}}
+	for _, varName := range varNames {
+		types := varTypeList[varName]
+		next := make([]map[string]string, 0, len(bindingSets)*len(types))
+		for _, existing := range bindingSets {
+			for _, rt := range types {
+				clone := make(map[string]string, len(existing)+2)
+				for k, v := range existing {
+					clone[k] = v
+				}
+				clone[varName] = rt
+				if varName == "input" || strings.HasPrefix(varName, "input.") {
+					clone["input"] = rt
+				}
+				next = append(next, clone)
+			}
+		}
+		bindingSets = next
+	}
+
+	return bindingSets, diags
 }
 
 // extractTypeEquality checks if a term is an rc.type ref and the other is a resource type string literal.
@@ -375,10 +424,15 @@ func validateRuleBody(r *ast.Rule, varTypes map[string]string, schemas model.Pro
 	var diags []model.SchemaDiagnostic
 	varBindings := make(map[string]intermediateBinding)
 
+	localVarTypes := make(map[string]string, len(varTypes)+1)
+	for k, v := range varTypes {
+		localVarTypes[k] = v
+	}
+
 	// In single-resource rules, if only one resource type is known, bind "input" as well.
-	if len(varTypes) == 1 {
-		for _, rt := range varTypes {
-			varTypes["input"] = rt
+	if len(localVarTypes) == 1 {
+		for _, rt := range localVarTypes {
+			localVarTypes["input"] = rt
 			break
 		}
 	}
@@ -387,7 +441,7 @@ func validateRuleBody(r *ast.Rule, varTypes map[string]string, schemas model.Pro
 		// 1. Discover intermediate variable bindings in this expression.
 		bindVar, sourceRef := extractBinding(expr)
 		if bindVar != "" && len(sourceRef) > 0 {
-			resType, prefix := resolveRefPrefix(sourceRef, varTypes, varBindings)
+			resType, prefix := resolveRefPrefix(sourceRef, localVarTypes, varBindings)
 			if resType != "" {
 				varBindings[bindVar] = intermediateBinding{
 					resourceType: resType,
@@ -398,7 +452,7 @@ func validateRuleBody(r *ast.Rule, varTypes map[string]string, schemas model.Pro
 
 		// 2. Validate all refs in the expression.
 		ast.WalkRefs(expr, func(ref ast.Ref) bool {
-			resType, segments := resolveRefPath(ref, varTypes, varBindings)
+			resType, segments := resolveRefPath(ref, localVarTypes, varBindings)
 			if resType == "" || len(segments) == 0 {
 				return false
 			}
@@ -580,7 +634,7 @@ func validatePathAgainstSchema(policyPath string, resourceType string, segments 
 		}
 
 		// 2. Does seg exist in Attributes?
-		if _, ok := curr.Attributes[seg.name]; ok {
+		if attr, ok := curr.Attributes[seg.name]; ok {
 			if isFinal {
 				return nil
 			}
@@ -588,6 +642,10 @@ func validatePathAgainstSchema(policyPath string, resourceType string, segments 
 			if nb, ok := curr.NestedBlocks[seg.name]; ok {
 				curr = nb
 				continue
+			}
+			// Allow arbitrary key access beneath free-form map, object, or dynamic attributes.
+			if attr.Type == "map" || attr.Type == "object" || attr.Type == "dynamic" {
+				return nil
 			}
 			return &model.SchemaDiagnostic{
 				PolicyFile:   policyPath,

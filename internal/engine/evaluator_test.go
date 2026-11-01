@@ -475,3 +475,125 @@ func TestEvaluatePlan_ContextCancellation(t *testing.T) {
 		t.Errorf("expected error to be context.Canceled, got %v", err)
 	}
 }
+
+func TestEvaluatePlan_ResourceReplacement_CaughtByPolicy(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+
+	replaceSnapshot := &model.PlanSnapshot{
+		SnapshotID:   "snap-replace-01",
+		RepoName:     "replace-repo",
+		TerraformVer: "1.9.0",
+		SourcePath:   "testdata/replace.json",
+		ResourceChanges: []model.ResourceChange{
+			{
+				Address:      "aws_s3_bucket.replaced_default",
+				Type:         "aws_s3_bucket",
+				Name:         "replaced_default",
+				ProviderName: "registry.terraform.io/hashicorp/aws",
+				Actions:      []string{"delete", "create"},
+				After: map[string]any{
+					"bucket": "unencrypted-replaced-bucket",
+				},
+			},
+			{
+				Address:      "azurerm_storage_account.replaced_cbd",
+				Type:         "azurerm_storage_account",
+				Name:         "replaced_cbd",
+				ProviderName: "registry.terraform.io/hashicorp/azurerm",
+				Actions:      []string{"create", "delete"},
+				After: map[string]any{
+					"name":                       "replacedcbdstorage",
+					"https_traffic_only_enabled": false,
+				},
+			},
+		},
+	}
+
+	eval := engine.NewEvaluator()
+	res, err := eval.EvaluatePlan(ctx, []string{policyPath}, replaceSnapshot)
+	if err != nil {
+		t.Fatalf("EvaluatePlan failed: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil EvalResult")
+	}
+	if res.Passed {
+		t.Errorf("expected Passed == false for non-compliant replaced resources, got true")
+	}
+	if len(res.Violations) != 2 {
+		t.Fatalf("expected 2 violations for both replaced resources, got %d: %+v", len(res.Violations), res.Violations)
+	}
+
+	if res.Violations[0].ResourceAddress != "aws_s3_bucket.replaced_default" || res.Violations[0].RuleID != "AWS-S3-ENCRYPT-001" {
+		t.Errorf("unexpected violation[0]: %+v", res.Violations[0])
+	}
+	if res.Violations[1].ResourceAddress != "azurerm_storage_account.replaced_cbd" || res.Violations[1].RuleID != "AZURE-STORAGE-HTTPS-001" {
+		t.Errorf("unexpected violation[1]: %+v", res.Violations[1])
+	}
+}
+
+func TestEvaluatePlan_PureDelete_ExcludedByPolicy(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+
+	deleteSnapshot := &model.PlanSnapshot{
+		SnapshotID:   "snap-delete-01",
+		RepoName:     "delete-repo",
+		TerraformVer: "1.9.0",
+		SourcePath:   "testdata/delete.json",
+		ResourceChanges: []model.ResourceChange{
+			{
+				Address:      "aws_s3_bucket.deleted_unencrypted",
+				Type:         "aws_s3_bucket",
+				Name:         "deleted_unencrypted",
+				ProviderName: "registry.terraform.io/hashicorp/aws",
+				Actions:      []string{"delete"},
+				After: map[string]any{
+					"bucket": "deleted-unencrypted-bucket",
+				},
+			},
+			{
+				Address:      "azurerm_storage_account.deleted_insecure",
+				Type:         "azurerm_storage_account",
+				Name:         "deleted_insecure",
+				ProviderName: "registry.terraform.io/hashicorp/azurerm",
+				Actions:      []string{"delete"},
+				After: map[string]any{
+					"name":                       "deletedinsecure",
+					"https_traffic_only_enabled": false,
+				},
+			},
+			{
+				Address:      "google_storage_bucket.deleted_open",
+				Type:         "google_storage_bucket",
+				Name:         "deleted_open",
+				ProviderName: "registry.terraform.io/hashicorp/google",
+				Actions:      []string{"delete"},
+				After: map[string]any{
+					"name":                        "deleted-open-bucket",
+					"uniform_bucket_level_access": false,
+				},
+			},
+		},
+	}
+
+	eval := engine.NewEvaluator()
+	res, err := eval.EvaluatePlan(ctx, []string{policyPath}, deleteSnapshot)
+	if err != nil {
+		t.Fatalf("EvaluatePlan failed: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil EvalResult")
+	}
+	if !res.Passed {
+		t.Errorf("expected Passed == true when all resources are pure deletes, got false with violations: %+v", res.Violations)
+	}
+	if len(res.Violations) != 0 {
+		t.Errorf("expected 0 violations for pure delete actions, got %d: %+v", len(res.Violations), res.Violations)
+	}
+}

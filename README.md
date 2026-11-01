@@ -174,7 +174,7 @@ import rego.v1
 deny contains violation if {
     some rc in input.resource_changes
     rc.type == "azurerm_storage_account"
-    not "delete" in rc.change.actions
+    rc.change.actions != ["delete"]
     rc.change.after.https_traffic_only_enabled == false
 
     violation := {

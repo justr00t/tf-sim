@@ -3,7 +3,7 @@ package tfsim
 import rego.v1
 
 is_delete(rc) if {
-	"delete" in rc.change.actions
+	rc.change.actions == ["delete"]
 }
 
 # Silent Fail-Open Bug 1: Typo in attribute name (https_only_enabled instead of https_traffic_only_enabled)

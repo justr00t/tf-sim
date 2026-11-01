@@ -27,3 +27,6 @@ go.work.sum
 *~
 .DS_Store
 Thumbs.db
+
+# Multi-agent planning artifacts
+/plans/

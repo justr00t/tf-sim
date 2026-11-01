@@ -376,3 +376,462 @@ func TestVerifyPolicy_NonexistentFile(t *testing.T) {
 		t.Fatal("expected error reading nonexistent policy file, got nil")
 	}
 }
+
+func TestVerifyPolicy_MapObjectDynamicChildAccess(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	rc.change.after.tags.Environment != "prod"
+	rc.change.after.tags["CostCenter"] != "cc-100"
+	violation := {
+		"rule_id": "AWS-TAGS-001",
+		"severity": "MEDIUM",
+		"message": "missing required tags",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "azurerm_storage_account"
+	rc.change.after.tags.Environment != "prod"
+	rc.change.after.tags["CostCenter"] != "cc-200"
+	violation := {
+		"rule_id": "AZURE-TAGS-001",
+		"severity": "MEDIUM",
+		"message": "missing required tags",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "google_storage_bucket"
+	t := rc.change.after.labels
+	t.team == "ml"
+	violation := {
+		"rule_id": "GCP-LABELS-001",
+		"severity": "LOW",
+		"message": "ml team label check",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "map_child_access.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("expected Valid == true for map child key access, got false with diagnostics: %+v", res.Diagnostics)
+	}
+	if len(res.Diagnostics) != 0 {
+		t.Errorf("expected 0 diagnostics, got %d: %+v", len(res.Diagnostics), res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicy_MultiTypeRule_ValidSharedAttribute(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type in ["aws_s3_bucket", "azurerm_storage_account"]
+	rc.change.after.tags.Environment == "prod"
+	violation := {
+		"rule_id": "MULTI-ARRAY-001",
+		"severity": "MEDIUM",
+		"message": "shared tags check via array literal",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type in {"aws_s3_bucket", "azurerm_storage_account"}
+	rc.change.after.tags.Environment == "prod"
+	violation := {
+		"rule_id": "MULTI-SET-001",
+		"severity": "MEDIUM",
+		"message": "shared tags check via set literal",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "multi_type_valid.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("expected Valid == true for valid shared attribute across multi-type rules, got false with diagnostics: %+v", res.Diagnostics)
+	}
+	if len(res.Diagnostics) != 0 {
+		t.Errorf("expected 0 diagnostics, got %d: %+v", len(res.Diagnostics), res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicy_MultiTypeRule_HelperPropagation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type in ["aws_s3_bucket", "azurerm_storage_account"]
+	has_required_tags(rc)
+	violation := {
+		"rule_id": "MULTI-HELPER-001",
+		"severity": "HIGH",
+		"message": "helper propagation test",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+
+has_required_tags(rc) if {
+	rc.change.after.invalid_helper_attr == true
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "multi_type_helper.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected Valid == false when helper accesses invalid attribute, got true")
+	}
+
+	var foundAWS, foundAzure bool
+	for _, diag := range res.Diagnostics {
+		if diag.InvalidPath == "invalid_helper_attr" && diag.Severity == "ERROR" {
+			switch diag.ResourceType {
+			case "aws_s3_bucket":
+				foundAWS = true
+			case "azurerm_storage_account":
+				foundAzure = true
+			}
+		}
+	}
+	if !foundAWS {
+		t.Errorf("expected ERROR diagnostic for aws_s3_bucket.invalid_helper_attr inside helper rule, got: %+v", res.Diagnostics)
+	}
+	if !foundAzure {
+		t.Errorf("expected ERROR diagnostic for azurerm_storage_account.invalid_helper_attr inside helper rule, got: %+v", res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicy_DynamicAndObjectSchemaAttributes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	schemas := model.ProviderSchemaMap{
+		"kubernetes_manifest": {
+			ResourceType: "kubernetes_manifest",
+			Attributes: map[string]model.AttributeDef{
+				"custom_obj": {
+					Name:     "custom_obj",
+					Type:     "object",
+					Optional: true,
+				},
+				"manifest": {
+					Name:     "manifest",
+					Type:     "dynamic",
+					Required: true,
+				},
+			},
+		},
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "kubernetes_manifest"
+	rc.change.after.custom_obj.nested.field == "expected"
+	rc.change.after.manifest.metadata.name == "my-app"
+	violation := {
+		"rule_id": "K8S-OBJ-DYN-001",
+		"severity": "HIGH",
+		"message": "object and dynamic nested traversal",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "dynamic_object_schema.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("expected Valid == true for object and dynamic attributes without NestedBlocks, got false with diagnostics: %+v", res.Diagnostics)
+	}
+	if len(res.Diagnostics) != 0 {
+		t.Errorf("expected 0 diagnostics, got %d: %+v", len(res.Diagnostics), res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicy_MultiTypeRule_InvalidAttrOnFirstOrSecondType(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type in ["aws_s3_bucket", "azurerm_storage_account"]
+	rc.change.after.https_traffic_only_enabled == false
+	rc.change.after.bucket == "my-bucket"
+	violation := {
+		"rule_id": "MULTI-INVALID-001",
+		"severity": "HIGH",
+		"message": "cross-type invalid attribute check",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "multi_type_invalid_both.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected Valid == false when attributes are invalid on first or second resource type, got true")
+	}
+
+	var foundInvalidOnFirst, foundInvalidOnSecond bool
+	for _, diag := range res.Diagnostics {
+		if diag.Severity != "ERROR" {
+			continue
+		}
+		if diag.ResourceType == "aws_s3_bucket" && diag.InvalidPath == "https_traffic_only_enabled" {
+			foundInvalidOnFirst = true
+		}
+		if diag.ResourceType == "azurerm_storage_account" && diag.InvalidPath == "bucket" {
+			foundInvalidOnSecond = true
+		}
+	}
+
+	if !foundInvalidOnFirst {
+		t.Errorf("expected ERROR diagnostic for https_traffic_only_enabled on aws_s3_bucket, got: %+v", res.Diagnostics)
+	}
+	if !foundInvalidOnSecond {
+		t.Errorf("expected ERROR diagnostic for bucket on azurerm_storage_account, got: %+v", res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicy_MultiTypeRule_SetLiteral_InvalidAttr(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type in {"aws_s3_bucket", "google_storage_bucket"}
+	rc.change.after.uniform_bucket_level_access == false
+	violation := {
+		"rule_id": "MULTI-SET-INVALID-001",
+		"severity": "HIGH",
+		"message": "set literal invalid attr check",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "multi_type_set_invalid.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected Valid == false when set literal rule accesses attribute missing on aws_s3_bucket, got true")
+	}
+
+	var foundAWS bool
+	for _, diag := range res.Diagnostics {
+		if diag.ResourceType == "aws_s3_bucket" && diag.InvalidPath == "uniform_bucket_level_access" && diag.Severity == "ERROR" {
+			foundAWS = true
+		}
+		if diag.ResourceType == "google_storage_bucket" && diag.InvalidPath == "uniform_bucket_level_access" {
+			t.Errorf("unexpected diagnostic for uniform_bucket_level_access on google_storage_bucket: %+v", diag)
+		}
+	}
+	if !foundAWS {
+		t.Errorf("expected ERROR diagnostic for uniform_bucket_level_access on aws_s3_bucket, got: %+v", res.Diagnostics)
+	}
+}
+
+func TestVerifyPolicy_MapTypoAndPrimitiveChildAccess(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	content := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "aws_s3_bucket"
+	rc.change.after.tgas.Environment == "prod"
+	rc.change.after.bucket.sub_field == "invalid"
+	violation := {
+		"rule_id": "AWS-TYPO-PRIMITIVE-001",
+		"severity": "HIGH",
+		"message": "map typo and primitive child access",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+`
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "map_typo_primitive_child.rego")
+	if err := os.WriteFile(policyPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp policy: %v", err)
+	}
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPolicy(ctx, policyPath, schemas)
+	if err != nil {
+		t.Fatalf("VerifyPolicy returned unexpected error: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected Valid == false for map typo and primitive child access, got true")
+	}
+
+	var foundTgasTypo, foundBucketPrimitive bool
+	for _, diag := range res.Diagnostics {
+		if diag.ResourceType == "aws_s3_bucket" && diag.InvalidPath == "tgas" && diag.Severity == "ERROR" {
+			if strings.Contains(diag.Message, "does not exist") {
+				foundTgasTypo = true
+			}
+		}
+		if diag.ResourceType == "aws_s3_bucket" && diag.InvalidPath == "bucket" && diag.Severity == "ERROR" {
+			if strings.Contains(diag.Message, "is not a nested block") {
+				foundBucketPrimitive = true
+			}
+		}
+	}
+
+	if !foundTgasTypo {
+		t.Errorf("expected ERROR diagnostic for InvalidPath 'tgas' ('does not exist'), got: %+v", res.Diagnostics)
+	}
+	if !foundBucketPrimitive {
+		t.Errorf("expected ERROR diagnostic for InvalidPath 'bucket' ('is not a nested block'), got: %+v", res.Diagnostics)
+	}
+}
