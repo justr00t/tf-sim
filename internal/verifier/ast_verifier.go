@@ -31,107 +31,153 @@ type segmentInfo struct {
 	row  int
 }
 
-// VerifyPolicy performs static analysis on a Rego policy against the provider schema.
+type parsedModule struct {
+	path string
+	mod  *ast.Module
+}
+
+// VerifyPolicy performs static analysis on a single Rego policy against the provider schema.
 func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas model.ProviderSchemaMap) (*model.VerificationResult, error) {
+	return v.VerifyPolicies(ctx, []string{policyPath}, schemas)
+}
+
+// VerifyPolicies performs static analysis on one or more Rego policy files against the provider schema.
+func (v *Verifier) VerifyPolicies(ctx context.Context, policyPaths []string, schemas model.ProviderSchemaMap) (*model.VerificationResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	fi, err := os.Stat(policyPath)
-	if err != nil {
-		return nil, fmt.Errorf("stat policy file %s: %w", policyPath, err)
-	}
-	if fi.IsDir() {
-		return nil, fmt.Errorf("stat policy file %s: is a directory", policyPath)
+	if len(policyPaths) == 0 {
+		return nil, fmt.Errorf("at least one policy path must be provided")
 	}
 
-	content, err := os.ReadFile(policyPath)
-	if err != nil {
-		return nil, fmt.Errorf("read policy file %s: %w", policyPath, err)
-	}
+	joinedPolicyPath := strings.Join(policyPaths, ", ")
+	orderedModules := make([]parsedModule, 0, len(policyPaths))
+	modulesMap := make(map[string]*ast.Module, len(policyPaths))
+	var parseDiags []model.SchemaDiagnostic
 
-	mod, err := ast.ParseModuleWithOpts(policyPath, string(content), ast.ParserOptions{RegoVersion: ast.RegoV1})
-	if err != nil {
-		var diags []model.SchemaDiagnostic
-		if astErrors, ok := err.(ast.Errors); ok {
-			for _, e := range astErrors {
-				row := 1
-				if e.Location != nil {
-					row = e.Location.Row
+	for _, p := range policyPaths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		fi, err := os.Stat(p)
+		if err != nil {
+			return nil, fmt.Errorf("stat policy file %s: %w", p, err)
+		}
+		if fi.IsDir() {
+			return nil, fmt.Errorf("stat policy file %s: is a directory", p)
+		}
+
+		content, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("read policy file %s: %w", p, err)
+		}
+
+		mod, err := ast.ParseModuleWithOpts(p, string(content), ast.ParserOptions{RegoVersion: ast.RegoV1})
+		if err != nil {
+			if astErrors, ok := err.(ast.Errors); ok {
+				for _, e := range astErrors {
+					row := 1
+					if e.Location != nil && e.Location.Row > 0 {
+						row = e.Location.Row
+					}
+					parseDiags = append(parseDiags, model.SchemaDiagnostic{
+						PolicyFile: p,
+						Line:       row,
+						Message:    e.Message,
+						Severity:   "ERROR",
+					})
 				}
-				diags = append(diags, model.SchemaDiagnostic{
-					PolicyFile: policyPath,
-					Line:       row,
-					Message:    e.Message,
+			} else {
+				parseDiags = append(parseDiags, model.SchemaDiagnostic{
+					PolicyFile: p,
+					Line:       1,
+					Message:    err.Error(),
 					Severity:   "ERROR",
 				})
 			}
-		} else {
-			diags = append(diags, model.SchemaDiagnostic{
-				PolicyFile: policyPath,
-				Line:       1,
-				Message:    err.Error(),
-				Severity:   "ERROR",
-			})
+			continue
 		}
+
+		orderedModules = append(orderedModules, parsedModule{path: p, mod: mod})
+		modulesMap[p] = mod
+	}
+
+	if len(parseDiags) > 0 {
 		return &model.VerificationResult{
-			PolicyPath:  policyPath,
+			PolicyPath:  joinedPolicyPath,
 			PackageName: "",
 			Valid:       false,
-			Diagnostics: diags,
+			Diagnostics: parseDiags,
 		}, nil
 	}
 
+	var uniquePkgs []string
+	seenPkg := make(map[string]bool)
+	for _, pm := range orderedModules {
+		if pm.mod.Package != nil && pm.mod.Package.Path != nil {
+			pkg := strings.TrimPrefix(pm.mod.Package.Path.String(), "data.")
+			if pkg != "" && !seenPkg[pkg] {
+				seenPkg[pkg] = true
+				uniquePkgs = append(uniquePkgs, pkg)
+			}
+		}
+	}
+	pkgName := strings.Join(uniquePkgs, ", ")
+
 	compiler := ast.NewCompiler()
-	compiler.Compile(map[string]*ast.Module{policyPath: mod})
+	compiler.Compile(modulesMap)
 	if compiler.Failed() {
 		var diags []model.SchemaDiagnostic
 		for _, e := range compiler.Errors {
 			row := 1
+			file := policyPaths[0]
 			if e.Location != nil {
-				row = e.Location.Row
+				if e.Location.Row > 0 {
+					row = e.Location.Row
+				}
+				if e.Location.File != "" {
+					file = e.Location.File
+				}
 			}
 			diags = append(diags, model.SchemaDiagnostic{
-				PolicyFile: policyPath,
+				PolicyFile: file,
 				Line:       row,
 				Message:    e.Message,
 				Severity:   "ERROR",
 			})
 		}
-		pkgName := ""
-		if mod.Package != nil && mod.Package.Path != nil {
-			pkgName = strings.TrimPrefix(mod.Package.Path.String(), "data.")
-		}
 		return &model.VerificationResult{
-			PolicyPath:  policyPath,
+			PolicyPath:  joinedPolicyPath,
 			PackageName: pkgName,
 			Valid:       false,
 			Diagnostics: diags,
 		}, nil
 	}
 
-	pkgName := ""
-	if mod.Package != nil && mod.Package.Path != nil {
-		pkgName = strings.TrimPrefix(mod.Package.Path.String(), "data.")
-	}
-
 	var diagnostics []model.SchemaDiagnostic
 
 	hasEntrypoint := false
-	for _, r := range mod.Rules {
-		headName := r.Head.Name.String()
-		if headName == "deny" || headName == "violation" {
-			hasEntrypoint = true
+	for _, pm := range orderedModules {
+		for _, r := range pm.mod.Rules {
+			headName := r.Head.Name.String()
+			if headName == "deny" || headName == "violation" {
+				hasEntrypoint = true
+				break
+			}
+		}
+		if hasEntrypoint {
 			break
 		}
 	}
 	if !hasEntrypoint {
 		row := 1
-		if mod.Package != nil && mod.Package.Location != nil {
-			row = mod.Package.Location.Row
+		firstMod := orderedModules[0].mod
+		if firstMod.Package != nil && firstMod.Package.Location != nil {
+			row = firstMod.Package.Location.Row
 		}
 		diagnostics = append(diagnostics, model.SchemaDiagnostic{
-			PolicyFile: policyPath,
+			PolicyFile: orderedModules[0].path,
 			Line:       row,
 			Message:    "policy must define at least one 'deny' or 'violation' rule",
 			Severity:   "ERROR",
@@ -140,25 +186,31 @@ func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas 
 
 	if len(schemas) == 0 {
 		return &model.VerificationResult{
-			PolicyPath:  policyPath,
+			PolicyPath:  joinedPolicyPath,
 			PackageName: pkgName,
 			Valid:       len(diagnostics) == 0,
 			Diagnostics: diagnostics,
 		}, nil
 	}
 
-	// Index rules by head name for helper call resolution.
+	// Index rules across all policy modules in deterministic order.
+	var allRules []*ast.Rule
+	ruleFile := make(map[*ast.Rule]string)
 	rulesByName := make(map[string][]*ast.Rule)
-	for _, r := range mod.Rules {
-		name := r.Head.Name.String()
-		rulesByName[name] = append(rulesByName[name], r)
+	for _, pm := range orderedModules {
+		for _, r := range pm.mod.Rules {
+			allRules = append(allRules, r)
+			ruleFile[r] = pm.path
+			name := r.Head.Name.String()
+			rulesByName[name] = append(rulesByName[name], r)
+		}
 	}
 
 	// Map each rule to sets of parameter bindings (paramName -> resourceType).
 	ruleBindings := make(map[*ast.Rule][]map[string]string)
 
 	// Step 1: Scan entrypoint and top-level rules for resource types and helper calls.
-	for _, r := range mod.Rules {
+	for _, r := range allRules {
 		headName := r.Head.Name.String()
 		isEntrypoint := (headName == "deny" || headName == "violation")
 		isParamless := len(r.Head.Args) == 0
@@ -167,7 +219,7 @@ func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas 
 			continue
 		}
 
-		localBindingSets, typeDiags := scanRuleResourceTypes(r, schemas, policyPath)
+		localBindingSets, typeDiags := scanRuleResourceTypes(r, schemas, ruleFile[r])
 		diagnostics = append(diagnostics, typeDiags...)
 
 		ruleBindings[r] = append(ruleBindings[r], localBindingSets...)
@@ -178,18 +230,18 @@ func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas 
 		}
 	}
 
-	// Step 2: Validate each rule against provider schemas.
-	for _, r := range mod.Rules {
+	// Step 2: Validate each rule against provider schemas using its originating file path.
+	for _, r := range allRules {
 		bindingSets := ruleBindings[r]
 		if len(bindingSets) == 0 {
 			// If not called by entrypoint, still scan its own local resource types.
-			localBindingSets, typeDiags := scanRuleResourceTypes(r, schemas, policyPath)
+			localBindingSets, typeDiags := scanRuleResourceTypes(r, schemas, ruleFile[r])
 			diagnostics = append(diagnostics, typeDiags...)
 			bindingSets = localBindingSets
 		}
 
 		for _, vt := range bindingSets {
-			ruleDiags := validateRuleBody(r, vt, schemas, policyPath)
+			ruleDiags := validateRuleBody(r, vt, schemas, ruleFile[r])
 			diagnostics = append(diagnostics, ruleDiags...)
 		}
 	}
@@ -197,8 +249,11 @@ func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas 
 	// Deduplicate diagnostics
 	diagnostics = deduplicateDiagnostics(diagnostics)
 
-	// Deterministic sort: Line ASC, ResourceType ASC, InvalidPath ASC
+	// Deterministic sort: PolicyFile ASC, Line ASC, ResourceType ASC, InvalidPath ASC
 	sort.Slice(diagnostics, func(i, j int) bool {
+		if diagnostics[i].PolicyFile != diagnostics[j].PolicyFile {
+			return diagnostics[i].PolicyFile < diagnostics[j].PolicyFile
+		}
 		if diagnostics[i].Line != diagnostics[j].Line {
 			return diagnostics[i].Line < diagnostics[j].Line
 		}
@@ -209,7 +264,7 @@ func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas 
 	})
 
 	return &model.VerificationResult{
-		PolicyPath:  policyPath,
+		PolicyPath:  joinedPolicyPath,
 		PackageName: pkgName,
 		Valid:       len(diagnostics) == 0,
 		Diagnostics: diagnostics,
@@ -373,53 +428,114 @@ func getRootVar(ref ast.Ref) string {
 	return ""
 }
 
-// propagateHelperCalls discovers calls to other rules in the policy and propagates parameter types.
+// propagateHelperCalls discovers calls to other rules in the policy (including across files/packages)
+// and propagates parameter resource types.
 func propagateHelperCalls(r *ast.Rule, localTypes map[string]string, rulesByName map[string][]*ast.Rule, ruleBindings map[*ast.Rule][]map[string]string) {
 	for _, expr := range r.Body {
-		terms, ok := expr.Terms.([]*ast.Term)
-		if !ok || len(terms) < 2 {
-			continue
-		}
-
-		fnName := ""
-		if ref, ok := terms[0].Value.(ast.Ref); ok && len(ref) == 1 {
-			fnName = ref[0].String()
-		} else if v, ok := terms[0].Value.(ast.Var); ok {
-			fnName = string(v)
-		}
-
-		targetRules, exists := rulesByName[fnName]
-		if !exists {
-			continue
-		}
-
-		// Map arguments to parameter positions.
-		for _, tr := range targetRules {
-			trBindings := make(map[string]string)
-			for argIdx := 1; argIdx < len(terms); argIdx++ {
-				paramIdx := argIdx - 1
-				if paramIdx >= len(tr.Head.Args) {
-					break
-				}
-				paramName := tr.Head.Args[paramIdx].String()
-				argVar := ""
-				if v, ok := terms[argIdx].Value.(ast.Var); ok {
-					argVar = string(v)
-				}
-				if resType, ok := localTypes[argVar]; ok {
-					trBindings[paramName] = resType
-				}
+		callSlices := extractExprCallSlices(expr)
+		for _, terms := range callSlices {
+			if len(terms) < 2 {
+				continue
 			}
-			if len(trBindings) > 0 {
-				ruleBindings[tr] = append(ruleBindings[tr], trBindings)
-				// Propagate recursively
-				propagateHelperCalls(tr, trBindings, rulesByName, ruleBindings)
+
+			fnName := extractCalledRuleName(terms[0])
+			if fnName == "" {
+				continue
+			}
+
+			targetRules, exists := rulesByName[fnName]
+			if !exists {
+				continue
+			}
+
+			// Map arguments to parameter positions.
+			for _, tr := range targetRules {
+				trBindings := make(map[string]string)
+				for argIdx := 1; argIdx < len(terms); argIdx++ {
+					paramIdx := argIdx - 1
+					if paramIdx >= len(tr.Head.Args) {
+						break
+					}
+					paramName := tr.Head.Args[paramIdx].String()
+					if v, ok := tr.Head.Args[paramIdx].Value.(ast.Var); ok {
+						paramName = string(v)
+					}
+					argVar := ""
+					if v, ok := terms[argIdx].Value.(ast.Var); ok {
+						argVar = string(v)
+					}
+					if resType, ok := localTypes[argVar]; ok {
+						trBindings[paramName] = resType
+					}
+				}
+				if len(trBindings) > 0 && !hasBindingSet(ruleBindings[tr], trBindings) {
+					ruleBindings[tr] = append(ruleBindings[tr], trBindings)
+					// Propagate recursively
+					propagateHelperCalls(tr, trBindings, rulesByName, ruleBindings)
+				}
 			}
 		}
 	}
 }
 
-// validateRuleBody performs AST ref extraction and schema cross-referencing.
+func extractExprCallSlices(expr *ast.Expr) [][]*ast.Term {
+	var result [][]*ast.Term
+	if terms, ok := expr.Terms.([]*ast.Term); ok && len(terms) >= 2 {
+		result = append(result, terms)
+		for _, t := range terms[1:] {
+			if t != nil {
+				if call, ok := t.Value.(ast.Call); ok && len(call) >= 2 {
+					result = append(result, []*ast.Term(call))
+				}
+			}
+		}
+	}
+	return result
+}
+
+func extractCalledRuleName(fnTerm *ast.Term) string {
+	if fnTerm == nil || fnTerm.Value == nil {
+		return ""
+	}
+	switch val := fnTerm.Value.(type) {
+	case ast.Var:
+		return string(val)
+	case ast.Ref:
+		if len(val) == 0 {
+			return ""
+		}
+		last := val[len(val)-1]
+		if v, ok := last.Value.(ast.Var); ok {
+			return string(v)
+		}
+		if s, ok := last.Value.(ast.String); ok {
+			return string(s)
+		}
+		return last.String()
+	}
+	return ""
+}
+
+func hasBindingSet(existingSets []map[string]string, candidate map[string]string) bool {
+	for _, existing := range existingSets {
+		if len(existing) != len(candidate) {
+			continue
+		}
+		match := true
+		for k, v := range candidate {
+			if existing[k] != v {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// validateRuleBody performs AST ref extraction, remediation.attribute_path extraction, and schema cross-referencing.
 func validateRuleBody(r *ast.Rule, varTypes map[string]string, schemas model.ProviderSchemaMap, policyPath string) []model.SchemaDiagnostic {
 	var diags []model.SchemaDiagnostic
 	varBindings := make(map[string]intermediateBinding)
@@ -464,7 +580,290 @@ func validateRuleBody(r *ast.Rule, varTypes map[string]string, schemas model.Pro
 		})
 	}
 
+	// 3. Validate remediation.attribute_path arrays in rule head and body.
+	remDiags := validateRuleRemediationPaths(r, localVarTypes, schemas, policyPath)
+	diags = append(diags, remDiags...)
+
 	return diags
+}
+
+// validateRuleRemediationPaths extracts and validates remediation.attribute_path arrays across r.Head and r.Body.
+func validateRuleRemediationPaths(r *ast.Rule, localVarTypes map[string]string, schemas model.ProviderSchemaMap, policyPath string) []model.SchemaDiagnostic {
+	seenTypes := make(map[string]bool)
+	var ruleResourceTypes []string
+	for _, rt := range localVarTypes {
+		if rt != "" && !seenTypes[rt] {
+			seenTypes[rt] = true
+			ruleResourceTypes = append(ruleResourceTypes, rt)
+		}
+	}
+	sort.Strings(ruleResourceTypes)
+
+	localTerms := extractLocalTermAssignments(r.Body)
+
+	var objects []ast.Object
+	collectObjects := func(obj ast.Object) {
+		objects = append(objects, obj)
+	}
+
+	if r.Head != nil {
+		walkTerm(r.Head.Key, collectObjects)
+		walkTerm(r.Head.Value, collectObjects)
+		for _, arg := range r.Head.Args {
+			walkTerm(arg, collectObjects)
+		}
+	}
+	for _, expr := range r.Body {
+		switch t := expr.Terms.(type) {
+		case *ast.Term:
+			walkTerm(t, collectObjects)
+		case []*ast.Term:
+			for _, term := range t {
+				walkTerm(term, collectObjects)
+			}
+		case *ast.SomeDecl:
+			for _, sym := range t.Symbols {
+				walkTerm(sym, collectObjects)
+			}
+		}
+	}
+
+	var diags []model.SchemaDiagnostic
+	validatedRemObjects := make(map[ast.Object]bool)
+
+	// Pass 1: Validate objects containing a "remediation" key (violation objects).
+	for _, obj := range objects {
+		remKeyTerm, remValTerm := objectKeyTerm(obj, "remediation")
+		if remValTerm == nil {
+			continue
+		}
+
+		resolvedRem := resolveTerm(remValTerm, localTerms)
+		if resolvedRem == nil {
+			continue
+		}
+		remObj, ok := resolvedRem.Value.(ast.Object)
+		if !ok {
+			continue
+		}
+		validatedRemObjects[remObj] = true
+
+		targetTypes := resolveViolationResourceTypes(obj, localTerms, localVarTypes, ruleResourceTypes, schemas)
+		if len(targetTypes) == 0 {
+			continue
+		}
+
+		attrKeyTerm, attrValTerm := objectKeyTerm(remObj, "attribute_path")
+		if attrValTerm == nil {
+			continue
+		}
+
+		fallbackRow := termLine(attrValTerm, termLine(attrKeyTerm, termLine(remValTerm, termLine(remKeyTerm, 1))))
+		resolvedAttrPath := resolveTerm(attrValTerm, localTerms)
+		if resolvedAttrPath == nil {
+			continue
+		}
+		arr, ok := resolvedAttrPath.Value.(*ast.Array)
+		if !ok {
+			continue
+		}
+
+		segments := extractArraySegments(arr, localTerms, termLine(resolvedAttrPath, fallbackRow))
+		if len(segments) == 0 {
+			continue
+		}
+
+		for _, rt := range targetTypes {
+			if d := validateRemediationPathAgainstSchema(policyPath, rt, segments, schemas); d != nil {
+				diags = append(diags, *d)
+			}
+		}
+	}
+
+	// Pass 2: Validate any standalone remediation objects (containing "attribute_path") not already validated in Pass 1.
+	if len(ruleResourceTypes) > 0 {
+		for _, obj := range objects {
+			if validatedRemObjects[obj] {
+				continue
+			}
+			attrKeyTerm, attrValTerm := objectKeyTerm(obj, "attribute_path")
+			if attrValTerm == nil {
+				continue
+			}
+
+			fallbackRow := termLine(attrValTerm, termLine(attrKeyTerm, 1))
+			resolvedAttrPath := resolveTerm(attrValTerm, localTerms)
+			if resolvedAttrPath == nil {
+				continue
+			}
+			arr, ok := resolvedAttrPath.Value.(*ast.Array)
+			if !ok {
+				continue
+			}
+
+			segments := extractArraySegments(arr, localTerms, termLine(resolvedAttrPath, fallbackRow))
+			if len(segments) == 0 {
+				continue
+			}
+
+			for _, rt := range ruleResourceTypes {
+				if d := validateRemediationPathAgainstSchema(policyPath, rt, segments, schemas); d != nil {
+					diags = append(diags, *d)
+				}
+			}
+		}
+	}
+
+	return diags
+}
+
+func resolveViolationResourceTypes(violationObj ast.Object, localTerms map[string]*ast.Term, localVarTypes map[string]string, fallbackTypes []string, schemas model.ProviderSchemaMap) []string {
+	_, rtValTerm := objectKeyTerm(violationObj, "resource_type")
+	if rtValTerm != nil {
+		resolvedRT := resolveTerm(rtValTerm, localTerms)
+		if resolvedRT != nil {
+			switch val := resolvedRT.Value.(type) {
+			case ast.String:
+				rt := string(val)
+				if _, ok := schemas[rt]; ok {
+					return []string{rt}
+				}
+			case ast.Ref:
+				root := getRootVar(val)
+				if rt, ok := localVarTypes[root]; ok && rt != "" {
+					return []string{rt}
+				}
+			}
+		}
+	}
+	return fallbackTypes
+}
+
+func extractLocalTermAssignments(body ast.Body) map[string]*ast.Term {
+	localTerms := make(map[string]*ast.Term)
+	for _, expr := range body {
+		terms, ok := expr.Terms.([]*ast.Term)
+		if !ok || len(terms) != 3 {
+			continue
+		}
+		op := expr.Operator().String()
+		if op != "assign" && op != "equal" && op != "eq" && op != "=" {
+			continue
+		}
+		lhs, rhs := terms[1], terms[2]
+		if v, isVar := lhs.Value.(ast.Var); isVar {
+			if _, rhsIsVar := rhs.Value.(ast.Var); !rhsIsVar {
+				localTerms[string(v)] = rhs
+			} else if _, exists := localTerms[string(v)]; !exists {
+				localTerms[string(v)] = rhs
+			}
+		}
+		if v, isVar := rhs.Value.(ast.Var); isVar {
+			if _, lhsIsVar := lhs.Value.(ast.Var); !lhsIsVar {
+				localTerms[string(v)] = lhs
+			} else if _, exists := localTerms[string(v)]; !exists {
+				localTerms[string(v)] = lhs
+			}
+		}
+	}
+	return localTerms
+}
+
+func resolveTerm(term *ast.Term, localTerms map[string]*ast.Term) *ast.Term {
+	curr := term
+	for depth := 0; depth < 8 && curr != nil; depth++ {
+		switch val := curr.Value.(type) {
+		case ast.Var:
+			next, ok := localTerms[string(val)]
+			if !ok || next == curr {
+				return curr
+			}
+			curr = next
+		case ast.Ref:
+			if len(val) == 1 {
+				if v, ok := val[0].Value.(ast.Var); ok {
+					next, exists := localTerms[string(v)]
+					if exists && next != curr {
+						curr = next
+						continue
+					}
+				}
+			}
+			return curr
+		default:
+			return curr
+		}
+	}
+	return curr
+}
+
+func walkTerm(term *ast.Term, visitObj func(ast.Object)) {
+	if term == nil || term.Value == nil {
+		return
+	}
+	switch val := term.Value.(type) {
+	case ast.Object:
+		visitObj(val)
+		val.Foreach(func(k, v *ast.Term) {
+			walkTerm(k, visitObj)
+			walkTerm(v, visitObj)
+		})
+	case *ast.Array:
+		for i := 0; i < val.Len(); i++ {
+			walkTerm(val.Elem(i), visitObj)
+		}
+	case ast.Set:
+		for _, elem := range val.Slice() {
+			walkTerm(elem, visitObj)
+		}
+	case ast.Call:
+		for _, elem := range val {
+			walkTerm(elem, visitObj)
+		}
+	}
+}
+
+func objectKeyTerm(obj ast.Object, key string) (*ast.Term, *ast.Term) {
+	var foundK, foundV *ast.Term
+	obj.Foreach(func(k, v *ast.Term) {
+		if foundV != nil {
+			return
+		}
+		if s, ok := k.Value.(ast.String); ok && string(s) == key {
+			foundK = k
+			foundV = v
+		}
+	})
+	return foundK, foundV
+}
+
+func termLine(t *ast.Term, fallback int) int {
+	if t != nil && t.Location != nil && t.Location.Row > 0 {
+		return t.Location.Row
+	}
+	return fallback
+}
+
+func extractArraySegments(arr *ast.Array, localTerms map[string]*ast.Term, fallbackRow int) []segmentInfo {
+	segments := make([]segmentInfo, 0, arr.Len())
+	for i := 0; i < arr.Len(); i++ {
+		rawElem := arr.Elem(i)
+		row := termLine(rawElem, fallbackRow)
+		resolvedElem := resolveTerm(rawElem, localTerms)
+		if resolvedElem == nil {
+			break
+		}
+		row = termLine(resolvedElem, row)
+		str, ok := resolvedElem.Value.(ast.String)
+		if !ok {
+			break
+		}
+		segments = append(segments, segmentInfo{
+			name: string(str),
+			row:  row,
+		})
+	}
+	return segments
 }
 
 // extractBinding discovers variable assignments from some ... in ... or := / =.
@@ -671,11 +1070,59 @@ func validatePathAgainstSchema(policyPath string, resourceType string, segments 
 	return nil
 }
 
+// validateRemediationPathAgainstSchema validates a remediation.attribute_path slice against the resource schema,
+// ensuring all segments exist and the final segment resolves to an attribute (or map/object/dynamic key) rather than a nested block.
+func validateRemediationPathAgainstSchema(policyPath string, resourceType string, segments []segmentInfo, schemas model.ProviderSchemaMap) *model.SchemaDiagnostic {
+	if len(segments) == 0 {
+		return nil
+	}
+	if d := validatePathAgainstSchema(policyPath, resourceType, segments, schemas); d != nil {
+		return d
+	}
+
+	// Ensure the final segment is an Attribute (or beneath a map/object/dynamic attribute),
+	// not solely a NestedBlock, because hcl_patcher sets the final segment via SetAttributeValue.
+	curr, ok := schemas[resourceType]
+	if !ok {
+		return nil
+	}
+	for i, seg := range segments {
+		isFinal := (i == len(segments)-1)
+		if isFinal {
+			if _, isAttr := curr.Attributes[seg.name]; isAttr {
+				return nil
+			}
+			if _, isBlock := curr.NestedBlocks[seg.name]; isBlock {
+				return &model.SchemaDiagnostic{
+					PolicyFile:   policyPath,
+					Line:         seg.row,
+					ResourceType: resourceType,
+					InvalidPath:  seg.name,
+					Message:      fmt.Sprintf("Remediation target %q is a nested block, not an attribute on resource %q", seg.name, resourceType),
+					Severity:     "ERROR",
+				}
+			}
+			return nil
+		}
+
+		if nb, ok := curr.NestedBlocks[seg.name]; ok {
+			curr = nb
+			continue
+		}
+		if attr, ok := curr.Attributes[seg.name]; ok {
+			if attr.Type == "map" || attr.Type == "object" || attr.Type == "dynamic" {
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
 func deduplicateDiagnostics(diags []model.SchemaDiagnostic) []model.SchemaDiagnostic {
 	seen := make(map[string]bool)
 	result := make([]model.SchemaDiagnostic, 0, len(diags))
 	for _, d := range diags {
-		key := fmt.Sprintf("%d:%s:%s:%s", d.Line, d.ResourceType, d.InvalidPath, d.Message)
+		key := fmt.Sprintf("%s:%d:%s:%s:%s", d.PolicyFile, d.Line, d.ResourceType, d.InvalidPath, d.Message)
 		if !seen[key] {
 			seen[key] = true
 			result = append(result, d)

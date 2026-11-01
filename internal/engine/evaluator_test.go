@@ -597,3 +597,162 @@ func TestEvaluatePlan_PureDelete_ExcludedByPolicy(t *testing.T) {
 		t.Errorf("expected 0 violations for pure delete actions, got %d: %+v", len(res.Violations), res.Violations)
 	}
 }
+
+func TestEvaluatePlan_QueryCachingAndConcurrentReuse(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+
+	awsSnap, err := p.ParsePlanFile(ctx, filepath.Join("..", "..", "testdata", "plans", "repo_payments_aws.json"), "repo-payments-aws")
+	if err != nil {
+		t.Fatalf("ParsePlanFile (aws) failed: %v", err)
+	}
+	azureSnap, err := p.ParsePlanFile(ctx, filepath.Join("..", "..", "testdata", "plans", "repo_data_azure.json"), "repo-data-azure")
+	if err != nil {
+		t.Fatalf("ParsePlanFile (azure) failed: %v", err)
+	}
+	gcpSnap, err := p.ParsePlanFile(ctx, filepath.Join("..", "..", "testdata", "plans", "repo_ml_gcp.json"), "repo-ml-gcp")
+	if err != nil {
+		t.Fatalf("ParsePlanFile (gcp) failed: %v", err)
+	}
+
+	snapshots := []*model.PlanSnapshot{awsSnap, azureSnap, gcpSnap}
+	expectedRuleIDs := []string{"AWS-S3-ENCRYPT-001", "AZURE-STORAGE-HTTPS-001", "GCP-STORAGE-UBLA-001"}
+
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+	eval := engine.NewEvaluator()
+
+	const workers = 12
+	const iterations = 5
+	errCh := make(chan error, workers*iterations)
+
+	for w := 0; w < workers; w++ {
+		workerID := w
+		go func() {
+			for i := 0; i < iterations; i++ {
+				idx := (workerID + i) % len(snapshots)
+				snap := snapshots[idx]
+				wantRule := expectedRuleIDs[idx]
+
+				res, evalErr := eval.EvaluatePlan(ctx, []string{policyPath}, snap)
+				if evalErr != nil {
+					errCh <- evalErr
+					continue
+				}
+				if res == nil || res.Passed || len(res.Violations) != 1 {
+					errCh <- errors.New("unexpected evaluation result state")
+					continue
+				}
+				if res.Violations[0].RuleID != wantRule {
+					errCh <- errors.New("unexpected rule_id: got " + res.Violations[0].RuleID + ", want " + wantRule)
+					continue
+				}
+				errCh <- nil
+			}
+		}()
+	}
+
+	for i := 0; i < workers*iterations; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("concurrent EvaluatePlan failed: %v", err)
+		}
+	}
+}
+
+func TestEvaluatePlan_CacheInvalidationOnFileEdit(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	planPath := filepath.Join("..", "..", "testdata", "plans", "repo_data_azure.json")
+	snapshot, err := p.ParsePlanFile(ctx, planPath, "repo-data-azure")
+	if err != nil {
+		t.Fatalf("ParsePlanFile failed: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	policyPath := filepath.Join(tmpDir, "dynamic_rule.rego")
+
+	v1Policy := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "azurerm_storage_account"
+	rc.change.after.https_traffic_only_enabled == false
+	violation := {
+		"rule_id": "AZURE-CACHE-V1",
+		"severity": "HIGH",
+		"message": "version 1 violation",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+`
+	if err := os.WriteFile(policyPath, []byte(v1Policy), 0644); err != nil {
+		t.Fatalf("failed to write v1 policy: %v", err)
+	}
+
+	eval := engine.NewEvaluator()
+
+	res1, err := eval.EvaluatePlan(ctx, []string{policyPath}, snapshot)
+	if err != nil {
+		t.Fatalf("first EvaluatePlan failed: %v", err)
+	}
+	if len(res1.Violations) != 1 || res1.Violations[0].RuleID != "AZURE-CACHE-V1" {
+		t.Fatalf("expected 1 violation with rule_id 'AZURE-CACHE-V1', got: %+v", res1.Violations)
+	}
+
+	// Overwrite the same policy file on disk with a new rule_id
+	v2Policy := strings.ReplaceAll(v1Policy, "AZURE-CACHE-V1", "AZURE-CACHE-V2")
+	if err := os.WriteFile(policyPath, []byte(v2Policy), 0644); err != nil {
+		t.Fatalf("failed to overwrite v2 policy: %v", err)
+	}
+
+	res2, err := eval.EvaluatePlan(ctx, []string{policyPath}, snapshot)
+	if err != nil {
+		t.Fatalf("second EvaluatePlan after file edit failed: %v", err)
+	}
+	if len(res2.Violations) != 1 || res2.Violations[0].RuleID != "AZURE-CACHE-V2" {
+		t.Fatalf("expected cache invalidation to produce rule_id 'AZURE-CACHE-V2', got: %+v", res2.Violations)
+	}
+}
+
+func TestEvaluatePlan_ZeroValueEvaluator(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	planPath := filepath.Join("..", "..", "testdata", "plans", "repo_payments_aws.json")
+	snapshot, err := p.ParsePlanFile(ctx, planPath, "repo-payments-aws")
+	if err != nil {
+		t.Fatalf("ParsePlanFile failed: %v", err)
+	}
+
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+	eval := &engine.Evaluator{}
+
+	// First call populates lazy cache on zero-value Evaluator
+	res1, err := eval.EvaluatePlan(ctx, []string{policyPath}, snapshot)
+	if err != nil {
+		t.Fatalf("ZeroValueEvaluator first EvaluatePlan failed: %v", err)
+	}
+	if res1 == nil || res1.Passed || len(res1.Violations) != 1 {
+		t.Fatalf("unexpected first result from zero-value Evaluator: %+v", res1)
+	}
+
+	// Second call hits populated cache on zero-value Evaluator
+	res2, err := eval.EvaluatePlan(ctx, []string{policyPath}, snapshot)
+	if err != nil {
+		t.Fatalf("ZeroValueEvaluator second EvaluatePlan failed: %v", err)
+	}
+	if res2 == nil || res2.Passed || len(res2.Violations) != 1 {
+		t.Fatalf("unexpected second result from zero-value Evaluator: %+v", res2)
+	}
+	if res2.Violations[0].RuleID != "AWS-S3-ENCRYPT-001" {
+		t.Errorf("expected RuleID == 'AWS-S3-ENCRYPT-001', got %q", res2.Violations[0].RuleID)
+	}
+}
