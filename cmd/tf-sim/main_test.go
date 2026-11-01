@@ -532,3 +532,114 @@ deny contains violation if {
 		}
 	})
 }
+
+// TestCLI_Remediate_ModuleAndForEachEndToEnd tests end-to-end `tf-sim remediate --write` with a module-scoped and count/for_each-indexed resource address.
+func TestCLI_Remediate_ModuleAndForEachEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+	tmpDir := t.TempDir()
+
+	planJSON := `{
+  "format_version": "1.2",
+  "terraform_version": "1.8.0",
+  "resource_changes": [
+    {
+      "address": "module.storage[\"us-east-1.prod\"].aws_s3_bucket.logs[0]",
+      "module_address": "module.storage[\"us-east-1.prod\"]",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "logs[0]",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "company-prod-logs-0",
+          "server_side_encryption_configuration": []
+        }
+      }
+    }
+  ]
+}`
+
+	planPath := filepath.Join(tmpDir, "plan.json")
+	if err := os.WriteFile(planPath, []byte(planJSON), 0o600); err != nil {
+		t.Fatalf("failed to write plan.json: %v", err)
+	}
+
+	tfDir := filepath.Join(tmpDir, "infra")
+	storageModDir := filepath.Join(tfDir, "modules", "storage")
+	if err := os.MkdirAll(storageModDir, 0o755); err != nil {
+		t.Fatalf("failed to mkdir storageModDir: %v", err)
+	}
+
+	rootHCL := `module "storage" {
+  for_each = toset(["us-east-1.prod", "us-west-2.prod"])
+  source   = "./modules/storage"
+}
+
+resource "aws_s3_bucket" "logs" {
+  bucket = "root-logs-bucket"
+}
+`
+	storageHCL := `resource "aws_s3_bucket" "logs" {
+  count  = 2
+  bucket = "company-prod-logs-${count.index}"
+}
+`
+
+	rootTfFile := filepath.Join(tfDir, "main.tf")
+	storageTfFile := filepath.Join(storageModDir, "main.tf")
+	if err := os.WriteFile(rootTfFile, []byte(rootHCL), 0o600); err != nil {
+		t.Fatalf("failed to write root main.tf: %v", err)
+	}
+	if err := os.WriteFile(storageTfFile, []byte(storageHCL), 0o600); err != nil {
+		t.Fatalf("failed to write modules/storage/main.tf: %v", err)
+	}
+
+	code := Execute(ctx, []string{
+		"remediate",
+		"--policy", policyPath,
+		"--plan", planPath,
+		"--tf-dir", tfDir,
+		"--write",
+		"--format", "json",
+	}, &stdout, &stderr)
+
+	if code != ExitOK {
+		t.Fatalf("expected ExitOK (%d), got %d; stderr: %s; stdout: %s", ExitOK, code, stderr.String(), stdout.String())
+	}
+
+	var patches []model.RemediationPatch
+	if err := json.Unmarshal(stdout.Bytes(), &patches); err != nil {
+		t.Fatalf("failed to unmarshal RemediationPatch slice JSON: %v\nOutput: %s", err, stdout.String())
+	}
+	if len(patches) != 1 {
+		t.Fatalf("expected 1 RemediationPatch, got %d", len(patches))
+	}
+	if patches[0].FilePath != "modules/storage/main.tf" {
+		t.Errorf("expected patch FilePath == \"modules/storage/main.tf\", got %q", patches[0].FilePath)
+	}
+
+	gotRootBytes, err := os.ReadFile(rootTfFile)
+	if err != nil {
+		t.Fatalf("failed to read root main.tf after remediate: %v", err)
+	}
+	if string(gotRootBytes) != rootHCL {
+		t.Errorf("expected root main.tf to remain unmodified, got:\n%s", string(gotRootBytes))
+	}
+
+	gotStorageBytes, err := os.ReadFile(storageTfFile)
+	if err != nil {
+		t.Fatalf("failed to read modules/storage/main.tf after remediate: %v", err)
+	}
+	gotStorageStr := string(gotStorageBytes)
+	if !strings.Contains(gotStorageStr, `sse_algorithm = "aws:kms"`) {
+		t.Errorf("expected modules/storage/main.tf to contain sse_algorithm = \"aws:kms\", got:\n%s", gotStorageStr)
+	}
+	if !strings.Contains(gotStorageStr, "count  = 2") {
+		t.Errorf("expected modules/storage/main.tf to preserve count = 2, got:\n%s", gotStorageStr)
+	}
+}
