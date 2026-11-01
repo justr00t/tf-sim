@@ -86,9 +86,11 @@ func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
-		policyPaths []string
-		schemaPath  string
-		format      string
+		policyPaths  []string
+		schemaPath   string
+		passFixtures []string
+		failFixtures []string
+		format       string
 	)
 
 	cmd := &cobra.Command{
@@ -118,7 +120,7 @@ func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 
 			v := verifier.NewVerifier()
-			res, err := v.VerifyPolicies(ctx, cleanedPaths, schemas)
+			res, err := v.VerifyPoliciesWithFixtures(ctx, cleanedPaths, schemas, passFixtures, failFixtures)
 			if err != nil {
 				return fmt.Errorf("verifying policy: %w", err)
 			}
@@ -138,7 +140,9 @@ func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 
 	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego)")
 	cmd.Flags().StringVar(&schemaPath, "schema", "", "Path to the Terraform provider schema JSON file")
-	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json|markdown)")
+	cmd.Flags().StringSliceVar(&passFixtures, "pass-fixtures", nil, "Path(s) to compliant Terraform plan JSON file(s) or directory that must pass policy evaluation (0 violations)")
+	cmd.Flags().StringSliceVar(&failFixtures, "fail-fixtures", nil, "Path(s) to non-compliant Terraform plan JSON file(s) or directory that must trigger policy violations (>= 1 violation)")
+	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json|markdown|sarif)")
 	_ = cmd.MarkFlagRequired("policy")
 
 	return cmd
@@ -199,7 +203,7 @@ func newEvalCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego)")
 	cmd.Flags().StringVar(&planPath, "plan", "", "Path to Terraform plan JSON file")
 	cmd.Flags().StringVar(&repoName, "repo", "", "Repository name for reporting (defaults to plan filename stem)")
-	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json|markdown)")
+	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json|markdown|sarif)")
 	_ = cmd.MarkFlagRequired("policy")
 	_ = cmd.MarkFlagRequired("plan")
 
@@ -259,7 +263,7 @@ func newBacktestCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego)")
 	cmd.Flags().StringVar(&plansDir, "plans-dir", "", "Directory containing historical Terraform plan JSON files")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 0, "Worker pool concurrency (defaults to runtime.NumCPU())")
-	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json|markdown)")
+	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json|markdown|sarif)")
 	_ = cmd.MarkFlagRequired("policy")
 	_ = cmd.MarkFlagRequired("plans-dir")
 
@@ -331,7 +335,7 @@ func newRemediateCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&tfDir, "tf-dir", "", "Directory containing Terraform (.tf) source files")
 	cmd.Flags().StringVar(&repoName, "repo", "", "Repository name for reporting (defaults to plan filename stem)")
 	cmd.Flags().BoolVar(&writeFlag, "write", false, "Write patched HCL changes back to .tf files in-place")
-	cmd.Flags().StringVar(&format, "format", report.FormatMarkdown, "Output format (table|json|markdown)")
+	cmd.Flags().StringVar(&format, "format", report.FormatMarkdown, "Output format (table|json|markdown|sarif)")
 	_ = cmd.MarkFlagRequired("policy")
 	_ = cmd.MarkFlagRequired("plan")
 	_ = cmd.MarkFlagRequired("tf-dir")

@@ -1357,3 +1357,315 @@ func TestVerifyPolicies_EmptyPathsAndMissingSecondFile(t *testing.T) {
 		t.Errorf("expected error to contain 'stat policy file', got %q", err.Error())
 	}
 }
+
+const compliantFixturePlanJSON = `{
+  "format_version": "1.2",
+  "terraform_version": "1.8.0",
+  "resource_changes": [
+    {
+      "address": "azurerm_storage_account.compliant_lake",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "compliant_lake",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "datalakeprod",
+          "https_traffic_only_enabled": true
+        }
+      }
+    }
+  ]
+}`
+
+func TestVerifyPoliciesWithFixtures_ValidPolicyAndMatchingFixtures(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+	tmpDir := t.TempDir()
+	passPlan := filepath.Join(tmpDir, "compliant.json")
+	if err := os.WriteFile(passPlan, []byte(compliantFixturePlanJSON), 0o600); err != nil {
+		t.Fatalf("failed to write compliant fixture plan: %v", err)
+	}
+
+	failPlanAWS := filepath.Join("..", "..", "testdata", "plans", "repo_payments_aws.json")
+	failPlanAzure := filepath.Join("..", "..", "testdata", "plans", "repo_data_azure.json")
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPoliciesWithFixtures(
+		ctx,
+		[]string{policyPath},
+		schemas,
+		[]string{passPlan},
+		[]string{failPlanAWS, failPlanAzure},
+	)
+	if err != nil {
+		t.Fatalf("VerifyPoliciesWithFixtures returned unexpected error: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("expected Valid == true, got false with diagnostics: %+v", res.Diagnostics)
+	}
+	if len(res.Diagnostics) != 0 {
+		t.Errorf("expected 0 diagnostics, got %d: %+v", len(res.Diagnostics), res.Diagnostics)
+	}
+
+	// Backward compatibility when passFixturePaths and failFixturePaths are nil
+	resNoFixtures, err := v.VerifyPoliciesWithFixtures(ctx, []string{policyPath}, schemas, nil, nil)
+	if err != nil {
+		t.Fatalf("VerifyPoliciesWithFixtures(nil, nil) returned unexpected error: %v", err)
+	}
+	if !resNoFixtures.Valid || len(resNoFixtures.Diagnostics) != 0 {
+		t.Errorf("expected Valid == true with 0 diagnostics when fixtures are nil, got: %+v", resNoFixtures)
+	}
+}
+
+func TestVerifyPoliciesWithFixtures_DirectoryFixtures(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := parser.NewParser()
+	schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+	schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+	if err != nil {
+		t.Fatalf("LoadProviderSchemas failed: %v", err)
+	}
+
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+	passDir := t.TempDir()
+	for _, name := range []string{"pass_one.json", "pass_two.json"} {
+		if err := os.WriteFile(filepath.Join(passDir, name), []byte(compliantFixturePlanJSON), 0o600); err != nil {
+			t.Fatalf("failed to write %s: %v", name, err)
+		}
+	}
+	failDir := filepath.Join("..", "..", "testdata", "plans")
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPoliciesWithFixtures(
+		ctx,
+		[]string{policyPath},
+		schemas,
+		[]string{passDir},
+		[]string{failDir},
+	)
+	if err != nil {
+		t.Fatalf("VerifyPoliciesWithFixtures with directories returned unexpected error: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("expected Valid == true for directory fixtures, got false with diagnostics: %+v", res.Diagnostics)
+	}
+	if len(res.Diagnostics) != 0 {
+		t.Errorf("expected 0 diagnostics, got %d: %+v", len(res.Diagnostics), res.Diagnostics)
+	}
+}
+
+func TestVerifyPoliciesWithFixtures_PassFixtureHasViolations(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	policyPath := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+	nonCompliantPlan := filepath.Join("..", "..", "testdata", "plans", "repo_payments_aws.json")
+
+	v := verifier.NewVerifier()
+	res, err := v.VerifyPoliciesWithFixtures(
+		ctx,
+		[]string{policyPath},
+		model.ProviderSchemaMap{},
+		[]string{nonCompliantPlan},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("VerifyPoliciesWithFixtures returned unexpected error: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected Valid == false when pass fixture produces violations, got true")
+	}
+
+	var foundPassDiag bool
+	for _, diag := range res.Diagnostics {
+		if diag.ResourceType == "fixture:pass" && diag.Severity == "ERROR" {
+			if strings.Contains(diag.Message, "AWS-S3-ENCRYPT-001") {
+				foundPassDiag = true
+			}
+		}
+	}
+	if !foundPassDiag {
+		t.Errorf("expected ERROR diagnostic with ResourceType 'fixture:pass' mentioning 'AWS-S3-ENCRYPT-001', got: %+v", res.Diagnostics)
+	}
+}
+
+func TestVerifyPoliciesWithFixtures_FailFixturePassesSilently_CatchesFailOpen(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	failPlanAzure := filepath.Join("..", "..", "testdata", "plans", "repo_data_azure.json")
+
+	t.Run("LogicalFailOpenPolicy_WithoutSchema", func(t *testing.T) {
+		// Schema-valid attribute name, but logical fail-open bug (requires action == delete instead of not delete)
+		logicalFailOpenRego := `package tfsim
+
+import rego.v1
+
+deny contains violation if {
+	some rc in input.resource_changes
+	rc.type == "azurerm_storage_account"
+	rc.change.actions == ["delete"]
+	rc.change.after.https_traffic_only_enabled == false
+	violation := {
+		"rule_id": "AZURE-INVERTED-001",
+		"severity": "HIGH",
+		"message": "inverted logic bug",
+		"resource_address": rc.address,
+		"resource_type": rc.type,
+		"resource_name": rc.name,
+	}
+}
+`
+		tmpDir := t.TempDir()
+		policyPath := filepath.Join(tmpDir, "inverted_logic.rego")
+		if err := os.WriteFile(policyPath, []byte(logicalFailOpenRego), 0o600); err != nil {
+			t.Fatalf("failed to write inverted_logic.rego: %v", err)
+		}
+
+		v := verifier.NewVerifier()
+		res, err := v.VerifyPoliciesWithFixtures(
+			ctx,
+			[]string{policyPath},
+			model.ProviderSchemaMap{},
+			nil,
+			[]string{failPlanAzure},
+		)
+		if err != nil {
+			t.Fatalf("VerifyPoliciesWithFixtures returned unexpected error: %v", err)
+		}
+		if res.Valid {
+			t.Fatalf("expected Valid == false when fail fixture passes silently, got true")
+		}
+
+		var foundFailDiag bool
+		for _, diag := range res.Diagnostics {
+			if diag.ResourceType == "fixture:fail" && diag.Severity == "ERROR" && strings.Contains(diag.Message, "potential silent fail-open bug") {
+				foundFailDiag = true
+			}
+		}
+		if !foundFailDiag {
+			t.Errorf("expected fixture:fail diagnostic mentioning 'potential silent fail-open bug', got: %+v", res.Diagnostics)
+		}
+	})
+
+	t.Run("BrokenFailOpenPolicy_WithSchemaAndFailFixture", func(t *testing.T) {
+		p := parser.NewParser()
+		schemaPath := filepath.Join("..", "..", "testdata", "schemas", "multicloud_schema.json")
+		schemas, err := p.LoadProviderSchemas(ctx, schemaPath)
+		if err != nil {
+			t.Fatalf("LoadProviderSchemas failed: %v", err)
+		}
+
+		brokenPolicyPath := filepath.Join("..", "..", "testdata", "policies", "broken_fail_open.rego")
+		v := verifier.NewVerifier()
+		res, err := v.VerifyPoliciesWithFixtures(
+			ctx,
+			[]string{brokenPolicyPath},
+			schemas,
+			nil,
+			[]string{failPlanAzure},
+		)
+		if err != nil {
+			t.Fatalf("VerifyPoliciesWithFixtures returned unexpected error: %v", err)
+		}
+		if res.Valid {
+			t.Fatalf("expected Valid == false, got true")
+		}
+
+		var foundSchemaTypo, foundFixtureFail bool
+		for _, diag := range res.Diagnostics {
+			if diag.ResourceType == "azurerm_storage_account" && diag.InvalidPath == "https_only_enabled" {
+				foundSchemaTypo = true
+			}
+			if diag.ResourceType == "fixture:fail" && strings.Contains(diag.Message, "potential silent fail-open bug") {
+				foundFixtureFail = true
+			}
+		}
+		if !foundSchemaTypo {
+			t.Errorf("expected schema typo diagnostic for https_only_enabled, got: %+v", res.Diagnostics)
+		}
+		if !foundFixtureFail {
+			t.Errorf("expected fixture:fail diagnostic proving broken_fail_open.rego failed open, got: %+v", res.Diagnostics)
+		}
+	})
+}
+
+func TestVerifyPoliciesWithFixtures_ErrorCases(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	validPolicy := filepath.Join("..", "..", "testdata", "policies", "storage_encryption.rego")
+	v := verifier.NewVerifier()
+
+	t.Run("NonexistentPassFixture", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "nonexistent_pass.json")
+		_, err := v.VerifyPoliciesWithFixtures(ctx, []string{validPolicy}, model.ProviderSchemaMap{}, []string{missing}, nil)
+		if err == nil {
+			t.Fatal("expected error for nonexistent pass fixture file, got nil")
+		}
+	})
+
+	t.Run("NonexistentFailFixture", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "nonexistent_fail.json")
+		_, err := v.VerifyPoliciesWithFixtures(ctx, []string{validPolicy}, model.ProviderSchemaMap{}, nil, []string{missing})
+		if err == nil {
+			t.Fatal("expected error for nonexistent fail fixture file, got nil")
+		}
+	})
+
+	t.Run("EmptyFixtureDirectory", func(t *testing.T) {
+		emptyDir := t.TempDir()
+		_, err := v.VerifyPoliciesWithFixtures(ctx, []string{validPolicy}, model.ProviderSchemaMap{}, []string{emptyDir}, nil)
+		if err == nil || !strings.Contains(err.Error(), "contains no .json plan files") {
+			t.Fatalf("expected error containing 'contains no .json plan files', got: %v", err)
+		}
+	})
+
+	t.Run("MalformedJSONFixture", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		badJSON := filepath.Join(tmpDir, "bad.json")
+		if err := os.WriteFile(badJSON, []byte("{not valid json"), 0o600); err != nil {
+			t.Fatalf("failed to write bad.json: %v", err)
+		}
+		_, err := v.VerifyPoliciesWithFixtures(ctx, []string{validPolicy}, model.ProviderSchemaMap{}, []string{badJSON}, nil)
+		if err == nil {
+			t.Fatal("expected error for malformed JSON fixture, got nil")
+		}
+	})
+
+	t.Run("PolicyWithSyntaxOrEntrypointError_ReturnsInvalidResultNotRuntimeError", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		passPlan := filepath.Join(tmpDir, "compliant.json")
+		if err := os.WriteFile(passPlan, []byte(compliantFixturePlanJSON), 0o600); err != nil {
+			t.Fatalf("failed to write compliant.json: %v", err)
+		}
+
+		noEntrypointPolicy := filepath.Join(tmpDir, "no_entrypoint.rego")
+		content := "package tfsim\nimport rego.v1\nhelper if { true }\n"
+		if err := os.WriteFile(noEntrypointPolicy, []byte(content), 0o600); err != nil {
+			t.Fatalf("failed to write no_entrypoint.rego: %v", err)
+		}
+
+		res, err := v.VerifyPoliciesWithFixtures(ctx, []string{noEntrypointPolicy}, model.ProviderSchemaMap{}, []string{passPlan}, nil)
+		if err != nil {
+			t.Fatalf("expected nil operational error when policy lacks deny entrypoint, got: %v", err)
+		}
+		if res == nil || res.Valid {
+			t.Fatalf("expected res.Valid == false for policy missing deny entrypoint, got: %+v", res)
+		}
+	})
+}
