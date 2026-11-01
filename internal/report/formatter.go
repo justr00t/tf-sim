@@ -111,6 +111,10 @@ func mapSARIFLevel(severity string) string {
 	}
 }
 
+func normalizeSARIFURI(p string) string {
+	return strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(p)), "\\", "/")
+}
+
 func newSARIFLog(rules []sarifReportingDescriptor, results []sarifResult) (string, error) {
 	if rules == nil {
 		rules = make([]sarifReportingDescriptor, 0)
@@ -239,9 +243,9 @@ func formatVerificationSARIF(res *model.VerificationResult) (string, error) {
 			})
 		}
 
-		uri := filepath.ToSlash(strings.TrimSpace(d.PolicyFile))
+		uri := normalizeSARIFURI(d.PolicyFile)
 		if uri == "" {
-			uri = filepath.ToSlash(strings.TrimSpace(res.PolicyPath))
+			uri = normalizeSARIFURI(res.PolicyPath)
 		}
 		if uri == "" {
 			uri = "policy.rego"
@@ -370,9 +374,9 @@ func formatEvalSARIF(res *model.EvalResult) (string, error) {
 	seenRules := make(map[string]bool)
 	results := make([]sarifResult, 0, len(res.Violations))
 
-	uri := filepath.ToSlash(strings.TrimSpace(res.RepoName))
+	uri := normalizeSARIFURI(res.RepoName)
 	if uri == "" {
-		uri = filepath.ToSlash(strings.TrimSpace(res.SnapshotID))
+		uri = normalizeSARIFURI(res.SnapshotID)
 	}
 	if uri == "" {
 		uri = "plan.json"
@@ -599,7 +603,7 @@ func formatBlastRadiusSARIF(rep *model.BlastRadiusReport) (string, error) {
 	results := make([]sarifResult, 0, rep.TotalViolations)
 
 	for _, imp := range rep.RepoImpacts {
-		uri := filepath.ToSlash(strings.TrimSpace(imp.RepoName))
+		uri := normalizeSARIFURI(imp.RepoName)
 		if uri == "" {
 			uri = "plan.json"
 		}
@@ -720,7 +724,7 @@ func formatRemediationSARIF(patches []model.RemediationPatch) (string, error) {
 	results := make([]sarifResult, 0, len(patches))
 
 	for _, p := range patches {
-		uri := filepath.ToSlash(strings.TrimSpace(p.FilePath))
+		uri := normalizeSARIFURI(p.FilePath)
 		if uri == "" {
 			uri = "main.tf"
 		}
