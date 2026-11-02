@@ -5,7 +5,7 @@
 [![Pure Go](https://img.shields.io/badge/Go-Pure_Go_(CGO__ENABLED%3D0)-00ADD8?logo=go)](./go.mod)
 [![Cloud Agnostic](https://img.shields.io/badge/Cloud-AWS_%7C_Azure_%7C_GCP_%7C_K8s_%7C_Any-purple)](#cloud-agnostic-by-design)
 
-**Cloud-agnostic Terraform & OpenTofu policy verification, historical blast-radius simulation, and surgical HCL auto-remediation engine in pure Go.**
+**Cloud-agnostic Terraform & OpenTofu policy verification, historical blast-radius simulation, surgical HCL auto-remediation engine, and local-first web control plane in pure Go.**
 
 ---
 
@@ -17,7 +17,7 @@ Platform and security engineering teams suffer from **"Audit-to-Enforce Paralysi
 2. **Unpredictable "Fail-Closed" Outages:** Enforcing a new guardrail without knowing which active repositories and deployment pipelines violate it causes immediate CI/CD blockages across engineering teams.
 3. **Manual Remediation Toil:** Security teams flag violations, leaving application engineers to manually hunt down `.tf` files and write compensating HCL changes across dozens of repositories.
 
-### Four Commands for the Full Policy Lifecycle
+### Five Commands for the Full Policy Lifecycle
 
 | Command | Stage | What It Does |
 | :--- | :--- | :--- |
@@ -25,6 +25,7 @@ Platform and security engineering teams suffer from **"Audit-to-Enforce Paralysi
 | **`tf-sim backtest`** | **Simulate Blast Radius** | Evaluates candidate policies concurrently across a historical corpus of `terraform plan -json` snapshots—answering in milliseconds which exact repos, plans, and cloud resources would break if enforced today. |
 | **`tf-sim eval`** | **Enforce in CI/CD** | Streams single `terraform plan -json` artifacts in $O(1)$ bounded memory (skipping massive `prior_state` / `configuration` blobs) and evaluates `resource_changes` deterministically. |
 | **`tf-sim remediate`** | **Auto-Patch HCL** | Maps policy violations back to source `.tf` files, mutates the HCL AST in-place via `hclwrite` (preserving comments and formatting), and generates unified Git diffs (`.patch`) for automated GitOps PRs. |
+| **`tf-sim serve` / `ui`** | **Interactive Web Workbench** | Launches a zero-dependency (`//go:embed`) local-first web control plane (`http://127.0.0.1:8080`) for interactive multi-repo blast-radius inspection, browser file uploads (`plan.json`, `.rego`, `schema.json`, `.tf`), live Rego AST & schema verification, and surgical HCL patch review. |
 
 ---
 
@@ -46,9 +47,10 @@ flowchart TD
         Evaluator["3. PolicyEvaluator (internal/engine)\nEmbedded opa/rego Runner"]
         Backtester["4. BacktestRunner (internal/backtest)\nMulti-Repo Blast-Radius Aggregator"]
         Remediator["5. RemediationGenerator (internal/remediate)\nhclwrite AST Patch & Unified Diff"]
+        WebServer["6. Web Control Plane (internal/server)\nEmbedded Basel Brass UI & REST API"]
     end
 
-    subgraph Outputs["Deterministic Outputs (table | json | markdown | sarif)"]
+    subgraph Outputs["Deterministic Outputs (table | json | markdown | sarif | web)"]
         VerifyOut["Policy Safety Report\n(Catches Fail-Open / Schema Typos)"]
         EvalOut["Evaluation Verdict & Exit Code"]
         BlastOut["Blast-Radius Impact Report\n(Broken Repos / Pipelines / Resources)"]
@@ -71,6 +73,10 @@ flowchart TD
     EvalOut --> Remediator
     HCL --> Remediator
     Remediator --> DiffOut
+
+    Verifier --> WebServer
+    Backtester --> WebServer
+    Remediator --> WebServer
 ```
 
 ---
@@ -147,6 +153,15 @@ Generate a unified Git diff (or pass `--write` to update `.tf` files in-place wh
   --format markdown
 ```
 
+### 5. Launch the Local-First Web Control Plane (`serve` / `ui`)
+Start the embedded web workbench on `http://127.0.0.1:8080` to inspect the multi-repo blast-radius ledger, upload your own `plan.json` / `.rego` / `.tf` files directly from the browser (`+ Load / Upload Files`), live-edit Rego policies with real-time schema verification, and preview or export `.patch` files:
+
+```bash
+./tf-sim serve
+# Or pass --allow-write to permit Stage C "Apply Surgical Patch" to write directly to workspace .tf files:
+./tf-sim serve --addr 127.0.0.1:8080 --allow-write
+```
+
 ---
 
 ## Using `tf-sim` with Real Terraform / OpenTofu Projects
@@ -214,7 +229,7 @@ deny contains violation if {
 
 ## Documentation & Architecture
 
-For deep-dive specifications on the streaming JSON parser, Rego AST reference walker, worker pool concurrency, and `hclwrite` surgical patcher, see [`DESIGN.md`](./DESIGN.md).
+For deep-dive specifications on the streaming JSON parser, Rego AST reference walker, worker pool concurrency, `hclwrite` surgical patcher, and local web control plane, see [`DESIGN.md`](./DESIGN.md).
 
 ## License
 
