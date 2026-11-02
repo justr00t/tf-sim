@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/justr00t/tf-sim/internal/backtest"
 	"github.com/justr00t/tf-sim/internal/engine"
@@ -15,6 +17,7 @@ import (
 	"github.com/justr00t/tf-sim/internal/parser"
 	"github.com/justr00t/tf-sim/internal/remediate"
 	"github.com/justr00t/tf-sim/internal/report"
+	"github.com/justr00t/tf-sim/internal/server"
 	"github.com/justr00t/tf-sim/internal/verifier"
 	"github.com/spf13/cobra"
 )
@@ -59,7 +62,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return ExitOK
 }
 
-// NewRootCmd constructs the root cobra.Command for tf-sim with verify, eval, backtest, and remediate subcommands.
+// NewRootCmd constructs the root cobra.Command for tf-sim with verify, eval, backtest, remediate, and serve subcommands.
 func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:           "tf-sim",
@@ -79,6 +82,7 @@ func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newEvalCmd(stdout, stderr),
 		newBacktestCmd(stdout, stderr),
 		newRemediateCmd(stdout, stderr),
+		newServeCmd(stdout, stderr),
 	)
 
 	return rootCmd
@@ -339,6 +343,71 @@ func newRemediateCmd(stdout, stderr io.Writer) *cobra.Command {
 	_ = cmd.MarkFlagRequired("policy")
 	_ = cmd.MarkFlagRequired("plan")
 	_ = cmd.MarkFlagRequired("tf-dir")
+
+	return cmd
+}
+
+func newServeCmd(stdout, _ io.Writer) *cobra.Command {
+	var (
+		addr         string
+		workspaceDir string
+		policyPath   string
+		schemaPath   string
+		corpusDir    string
+		plansDir     string
+		reposDir     string
+		reposDirAlt  string
+		workers      int
+		allowWrite   bool
+	)
+
+	cmd := &cobra.Command{
+		Use:     "serve",
+		Aliases: []string{"ui"},
+		Short:   "Launch the local-first Basel Brass Policy Lifecycle & Blast-Radius Control Plane",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			sigCtx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
+			resolvedCorpus := strings.TrimSpace(corpusDir)
+			if strings.TrimSpace(plansDir) != "" && !cmd.Flags().Changed("corpus") {
+				resolvedCorpus = strings.TrimSpace(plansDir)
+			}
+			resolvedRepos := strings.TrimSpace(reposDir)
+			if strings.TrimSpace(reposDirAlt) != "" && !cmd.Flags().Changed("repos") {
+				resolvedRepos = strings.TrimSpace(reposDirAlt)
+			}
+
+			srv, err := server.NewServer(server.Config{
+				Addr:         addr,
+				WorkspaceDir: workspaceDir,
+				PolicyPath:   policyPath,
+				SchemaPath:   schemaPath,
+				CorpusDir:    resolvedCorpus,
+				ReposDir:     resolvedRepos,
+				Workers:      workers,
+				AllowWrite:   allowWrite,
+			})
+			if err != nil {
+				return fmt.Errorf("initializing control-plane server: %w", err)
+			}
+
+			fmt.Fprintf(stdout, "tf-sim control-plane listening on http://%s\n", srv.Addr())
+			return srv.ListenAndServe(sigCtx)
+		},
+	}
+
+	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:8080", "Loopback bind address for the local control-plane server")
+	cmd.Flags().StringVar(&workspaceDir, "workspace", ".", "Workspace root directory containing policies, schemas, plans, and repos")
+	cmd.Flags().StringVar(&policyPath, "policy", filepath.FromSlash("testdata/policies/storage_encryption.rego"), "Default Rego policy file relative to workspace")
+	cmd.Flags().StringVar(&schemaPath, "schema", filepath.FromSlash("testdata/schemas/multicloud_schema.json"), "Default Terraform provider schema JSON file relative to workspace")
+	cmd.Flags().StringVar(&corpusDir, "corpus", filepath.FromSlash("testdata/plans"), "Directory containing historical Terraform plan JSON snapshots relative to workspace")
+	cmd.Flags().StringVar(&plansDir, "plans-dir", "", "Alias for --corpus directory containing historical Terraform plan JSON snapshots")
+	cmd.Flags().StringVar(&reposDir, "repos", filepath.FromSlash("testdata/repos"), "Directory containing target Terraform (.tf) repositories relative to workspace")
+	cmd.Flags().StringVar(&reposDirAlt, "repos-dir", "", "Alias for --repos directory containing target Terraform (.tf) repositories")
+	cmd.Flags().IntVar(&workers, "workers", 0, "Worker pool concurrency for corpus simulation (defaults to runtime.NumCPU())")
+	cmd.Flags().BoolVar(&allowWrite, "allow-write", false, "Allow POST /api/apply with write=true to mutate .tf files on disk")
 
 	return cmd
 }

@@ -567,3 +567,64 @@ We execute the build in 4 discrete phases:
     - `tf-sim backtest --policy <path> --plans-dir <dir>`
     - `tf-sim remediate --policy <path> --plan <plan.json> --tf-dir <dir> [--write]`
 * **Acceptance Gate:** Full end-to-end CLI execution and unit/integration test suite (`CGO_ENABLED=0 go test -v ./...`) pass with zero warnings.
+
+---
+
+## 8. Local-First Web Control Plane (`internal/server` & `tf-sim serve`)
+
+### 8.1 Overview & Single-Binary Architecture
+To provide an interactive, visual policy lifecycle workbench without external runtime dependencies or cloud SaaS telemetry, `tf-sim` includes a local-first HTTP control plane (`internal/server`) exposed via `tf-sim serve` (alias `tf-sim ui`).
+
+Static frontend assets (`internal/server/static/index.html`, `styles.css`, `app.js`) are compiled directly into the `CGO_ENABLED=0` Go binary using `//go:embed static/*`. The UI implements the locked **Candidate A ("Basel Brass")** Swiss Editorial Ledger visual architecture (`.design-foundations/DESIGN-UI.md`, `JOURNEY.md`) across three integrated lifecycle views:
+1. **Stage A (`backtest`):** Multi-Repository Blast-Radius Backtest Matrix with per-provider breakdown (`hashicorp/aws`, `hashicorp/azurerm`, `hashicorp/google`) and Enforce Readiness Verdict header.
+2. **Stage B (`verify`):** Live OPA Rego v1 AST & Provider Schema Studio with line-level `SchemaDiagnostic` highlighting, interactive Rego live editing, and `multicloud_schema.json` explorer.
+3. **Stage C (`remediate`):** Surgical `hclwrite` HCL AST Diff Reviewer with comment-preservation verification, `.patch` export, and sandbox/disk patch application.
+
+### 8.2 Package Contracts (`internal/server`)
+```go
+package server
+
+// Config configures the local-first HTTP control plane server.
+type Config struct {
+	Addr         string   // Default: "127.0.0.1:8080"
+	WorkspaceDir string   // Default: "."
+	PolicyPath   string   // Default: "testdata/policies/storage_encryption.rego"
+	SchemaPath   string   // Default: "testdata/schemas/multicloud_schema.json"
+	CorpusDir    string   // Default: "testdata/plans"
+	PlansDir     string   // Optional alias for CorpusDir
+	ReposDir     string   // Default: "testdata/repos"
+	PassFixtures []string // Optional pass fixtures for VerifyPoliciesWithFixtures
+	FailFixtures []string // Optional fail fixtures for VerifyPoliciesWithFixtures
+	Workers      int      // Default: runtime.NumCPU()
+	AllowWrite   bool     // Default: false (in-memory sandbox apply unless true)
+}
+
+type Server struct {
+	// Implements http.Handler via ServeHTTP(w http.ResponseWriter, r *http.Request)
+}
+
+func NewServer(cfg Config) (*Server, error)
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request)
+func (s *Server) ListenAndServe(ctx context.Context) error
+func (s *Server) ResolveWorkspacePath(relOrAbs string) (string, error)
+func (s *Server) ResolveWorkspaceRel(userPath string) (absPath string, relSlash string, err error)
+```
+
+### 8.3 REST API Endpoints
+- **`GET /api/workspace`**:
+  - Evaluates the active policy (`?policy=...` or `?state=violations-detected|fail-open-caught|enforce-ready`) against the provider schema, historical plan corpus (excluding fixture-only `pass_compliant.json`), and target `.tf` repositories.
+  - Returns `WorkspaceResponse` JSON containing `state`, `verification` (`*model.VerificationResult`), `policy_lines`, `schemas` (`model.ProviderSchemaMap`), `backtest` (`*model.BlastRadiusReport`), `snapshot_rows`, and `patches` (`[]PatchView`).
+- **`POST /api/verify`**:
+  - Accepts `{"policy_path": "...", "policy_content": "..."}`. Supports verifying both on-disk workspace `.rego` files and live in-browser edited Rego content against the loaded `model.ProviderSchemaMap`.
+- **`POST /api/backtest`**:
+  - Accepts `{"policy_path": "...", "policy_content": "...", "corpus_dir": "...", "reset": false}` and runs concurrent multi-repo blast-radius simulation via `backtest.Runner`.
+- **`POST /api/remediate`**:
+  - Accepts `{"policy_path": "...", "repos_dir": "...", "resource_address": "...", "apply": false}` and generates surgical comment-preserving `hclwrite` patches and unified Git diffs.
+- **`POST /api/apply`**:
+  - Applies staged HCL remediation patches. When `AllowWrite` is `false` (default), updates the session's in-memory sandbox state (`remediatedResources` and `patchedHCLByRepo`) so re-simulation transitions cleanly to `enforce-ready` (`0` violations across `3/3` repos) without modifying git-tracked files in `testdata/repos`. When `--allow-write` is enabled, writes patched `.tf` files in-place via `remediate.Patcher.ApplyPatches`.
+
+### 8.4 Security & Operational Hardening
+1. **Localhost Binding (`127.0.0.1:8080`):** Prevents accidental network exposure on untrusted LANs.
+2. **Workspace Path Containment (`ResolveWorkspacePath`):** Rejects any relative (`..`) or symlink path escape outside `WorkspaceDir` with HTTP `400`/`403`.
+3. **Bounded Request Payloads:** Wraps all `POST` bodies with `http.MaxBytesReader(w, r.Body, 2<<20)` (2 MiB limit).
+4. **Graceful Signal Shutdown:** `tf-sim serve` traps `os.Interrupt` (`SIGINT`) and `syscall.SIGTERM` via `signal.NotifyContext` and drains active HTTP connections via `http.Server.Shutdown`.

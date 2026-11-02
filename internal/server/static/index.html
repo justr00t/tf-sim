@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en" data-state="violations-detected" data-view="backtest">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tf-sim · Policy Lifecycle &amp; Blast-Radius Control Plane (Basel Brass)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css?v=2">
+  <script src="/app.js?v=2" defer></script>
+</head>
+<body>
+  <div class="workbench-frame">
+    <!-- TOP CONTROL BAR -->
+    <header class="top-ledger-bar">
+      <div class="brand-cell">
+        <span class="brand-mark">tf-sim // control-plane</span>
+        <span class="brand-rev">v0.4.2 · OPA v1</span>
+      </div>
+      <div class="context-strip" aria-label="Active Workspace Corpus">
+        <div class="kv-item">
+          <span class="kv-label">Corpus</span>
+          <span class="kv-val" id="corpus-pill">testdata/plans/ (3 repos · 6 resources)</span>
+        </div>
+        <div class="kv-item">
+          <span class="kv-label">Schema</span>
+          <span class="kv-val" id="schema-pill">testdata/schemas/multicloud_schema.json</span>
+        </div>
+        <div class="kv-item">
+          <span class="kv-label">Active Policy</span>
+          <span class="kv-val" id="active-policy-pill">storage_encryption.rego</span>
+        </div>
+        <button type="button" class="state-pill" id="btn-open-loader" data-open-loader="toggle" aria-expanded="false" aria-controls="workspace-loader-drawer">
+          + Load / Upload Files
+        </button>
+      </div>
+      <div class="state-switcher-cell" role="group" aria-label="Interactive State Matrix">
+        <span class="kv-label">Simulate State:</span>
+        <button type="button" class="state-pill" data-set-state="empty" aria-pressed="false" id="pill-state-empty">
+          Empty (0 Loaded)
+        </button>
+        <button type="button" class="state-pill" data-set-state="violations-detected" aria-pressed="true" id="pill-state-violations">
+          Violations (3/3 Blocked)
+        </button>
+        <button type="button" class="state-pill" data-set-state="fail-open-caught" aria-pressed="false" id="pill-state-failopen">
+          Fail-Open Caught (Line 14)
+        </button>
+        <button type="button" class="state-pill" data-set-state="enforce-ready" aria-pressed="false" id="pill-state-ready">
+          Enforce-Ready (0 Blocked)
+        </button>
+      </div>
+    </header>
+
+    <!-- WORKSPACE FILE LOADER & UPLOAD DRAWER -->
+    <section class="workspace-drawer" id="workspace-loader-drawer" hidden style="display: none;" aria-label="Load or Upload Workspace Files">
+      <div class="split-workbench">
+        <div class="pane-left">
+          <div class="pane-toolbar">
+            <h3 class="pane-heading">1. Upload Files from Browser (Local Sandbox)</h3>
+            <span class="code-inline">POST /api/workspace/upload</span>
+          </div>
+          <div class="drawer-form-stack">
+            <div class="form-field">
+              <label class="telemetry-label" for="upload-plan-files">Terraform Plan JSON Snapshots (.json from <code>terraform show -json</code>)</label>
+              <input type="file" id="upload-plan-files" class="file-input" accept=".json,application/json" multiple>
+            </div>
+            <div class="form-field">
+              <label class="telemetry-label" for="upload-policy-file">OPA Rego Policy (.rego) · optional, defaults to active policy</label>
+              <input type="file" id="upload-policy-file" class="file-input" accept=".rego,text/plain">
+            </div>
+            <div class="form-field">
+              <label class="telemetry-label" for="upload-schema-file">Provider Schema JSON (from <code>terraform providers schema -json</code>)</label>
+              <input type="file" id="upload-schema-file" class="file-input" accept=".json,application/json">
+              <label class="checkbox-row">
+                <input type="checkbox" id="upload-use-builtin-schema" checked>
+                <span>Use built-in Multi-Cloud Provider Schema (AWS, Azure, GCP) if no schema file is selected</span>
+              </label>
+            </div>
+            <div class="form-field">
+              <label class="telemetry-label" for="upload-tf-files">Terraform HCL Source Files (.tf) · optional, enables Stage C surgical auto-remediation</label>
+              <input type="file" id="upload-tf-files" class="file-input" accept=".tf,text/plain" multiple>
+            </div>
+            <div class="verdict-actions">
+              <button type="button" class="tactile-btn cta-primary" id="btn-submit-upload">
+                &#9654; Upload &amp; Evaluate Files
+              </button>
+              <span class="code-inline" id="upload-status-msg">Ready for local browser file selection</span>
+            </div>
+          </div>
+        </div>
+        <div class="pane-right">
+          <div class="pane-toolbar">
+            <h3 class="pane-heading">2. Configure Local Workspace Paths or Presets</h3>
+            <button type="button" class="filter-btn" id="btn-close-loader">Close Drawer &times;</button>
+          </div>
+          <div class="drawer-form-stack">
+            <div class="form-field">
+              <label class="telemetry-label" for="cfg-corpus-dir">Plans Corpus Directory (relative to workspace root)</label>
+              <input type="text" id="cfg-corpus-dir" class="text-input" placeholder="testdata/plans" value="testdata/plans">
+            </div>
+            <div class="form-field">
+              <label class="telemetry-label" for="cfg-policy-path">Rego Policy Path (relative to workspace root)</label>
+              <input type="text" id="cfg-policy-path" class="text-input" placeholder="testdata/policies/storage_encryption.rego" value="testdata/policies/storage_encryption.rego">
+            </div>
+            <div class="form-field">
+              <label class="telemetry-label" for="cfg-schema-path">Provider Schema JSON Path (relative to workspace root)</label>
+              <input type="text" id="cfg-schema-path" class="text-input" placeholder="testdata/schemas/multicloud_schema.json" value="testdata/schemas/multicloud_schema.json">
+            </div>
+            <div class="form-field">
+              <label class="telemetry-label" for="cfg-repos-dir">HCL Repositories Directory (relative to workspace root)</label>
+              <input type="text" id="cfg-repos-dir" class="text-input" placeholder="testdata/repos" value="testdata/repos">
+            </div>
+            <div class="verdict-actions">
+              <button type="button" class="tactile-btn cta-primary" id="btn-apply-paths">
+                Load Workspace Paths
+              </button>
+              <button type="button" class="tactile-btn" id="btn-load-demo-corpus">
+                Load Sample 3-Cloud Corpus (testdata/)
+              </button>
+              <button type="button" class="tactile-btn" id="btn-clear-workspace">
+                Clear to Empty State (0 Loaded)
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PRIMARY FOCAL POINT: ENFORCE READINESS VERDICT HEADER -->
+    <section class="verdict-ledger" aria-labelledby="verdict-title">
+      <div class="verdict-main-col">
+        <div class="verdict-overline">
+          <span class="badge-stamp stamp-blocked" id="verdict-stamp">[BLOCKED] DO NOT FLIP TO DENY</span>
+          <span class="code-inline" id="verdict-ast-pill">AST &amp; Schema Check: VALID (0 Typos)</span>
+          <span class="code-inline" id="verdict-eval-time">Eval: 14.2ms · 8 Workers</span>
+        </div>
+        <h1 class="verdict-headline" id="verdict-title">
+          Enforce Readiness: <em>3 of 3 repositories</em> would fail CI/CD under <span id="verdict-policy-name">storage_encryption.rego</span>
+        </h1>
+        <p class="verdict-summary" id="verdict-desc">
+          Historical backtest across 3 cloud providers surfaced 3 non-compliant storage resources. Surgical hclwrite remediation patches are staged and verified to preserve existing HCL comments.
+        </p>
+        <div class="verdict-actions">
+          <button type="button" class="tactile-btn cta-primary" id="btn-run-sim">
+            &#9654; Run Full Corpus Simulation
+          </button>
+          <button type="button" class="tactile-btn" data-goto-view="verify">
+            Inspect Rego AST &amp; Schema
+          </button>
+          <button type="button" class="tactile-btn" data-goto-view="remediate">
+            Review 3 Surgical HCL Patches
+          </button>
+        </div>
+      </div>
+
+      <div class="verdict-telemetry-col" aria-label="Corpus Blast-Radius Telemetry">
+        <div class="telemetry-cell">
+          <span class="telemetry-label">Impacted Repositories</span>
+          <div class="telemetry-val tabular" id="metric-repos">3 / 3</div>
+          <span class="telemetry-sub" id="metric-repos-sub">100.0% corpus blast radius</span>
+        </div>
+        <div class="telemetry-cell">
+          <span class="telemetry-label">Total Violations</span>
+          <div class="telemetry-val tabular" id="metric-violations">3</div>
+          <span class="telemetry-sub" id="metric-violations-sub">2 HIGH · 1 MEDIUM severity</span>
+        </div>
+        <div class="telemetry-cell">
+          <span class="telemetry-label">AST Schema Diagnostics</span>
+          <div class="telemetry-val tabular" id="metric-schema">0 Errors</div>
+          <span class="telemetry-sub" id="metric-schema-sub">3 resource types verified</span>
+        </div>
+        <div class="telemetry-cell">
+          <span class="telemetry-label">HCL Auto-Fixes Ready</span>
+          <div class="telemetry-val tabular" id="metric-patches">3 .patch</div>
+          <span class="telemetry-sub" id="metric-patches-sub">hclwrite comment-safe</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- STAGE NAVIGATION SPINE -->
+    <nav class="stage-nav-bar" aria-label="Policy Lifecycle Stage">
+      <div class="stage-tab-group" role="tablist">
+        <button type="button" class="stage-tab" role="tab" data-set-view="backtest" aria-selected="true">
+          <span class="stage-tab-num">STAGE A</span> Blast-Radius Backtest Matrix
+        </button>
+        <button type="button" class="stage-tab" role="tab" data-set-view="verify" aria-selected="false">
+          <span class="stage-tab-num">STAGE B</span> Live Policy &amp; Schema Studio
+        </button>
+        <button type="button" class="stage-tab" role="tab" data-set-view="remediate" aria-selected="false">
+          <span class="stage-tab-num">STAGE C</span> Surgical HCL Remediation Reviewer
+        </button>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">CLI Equivalent:</span>
+        <span class="kv-val" id="cli-cmd-preview">tf-sim backtest -&#45;policy testdata/policies/storage_encryption.rego -&#45;corpus testdata/plans/</span>
+      </div>
+    </nav>
+
+    <main class="stage-viewport">
+      <!-- =========================================================
+           STAGE A: BLAST-RADIUS BACKTEST MATRIX (data-view="backtest")
+           ========================================================= -->
+      <section id="panel-backtest" class="stage-panel" aria-labelledby="heading-backtest">
+        <div class="provider-strip" aria-label="Cloud Provider Breakdown">
+          <div class="provider-cell">
+            <div class="provider-cell-top">
+              <span class="provider-kicker">AWS · S3 Storage</span>
+              <span class="badge-stamp stamp-blocked" id="prov-aws-badge">1 VIOLATION (HIGH)</span>
+            </div>
+            <div>
+              <div class="provider-id">registry.terraform.io/hashicorp/aws</div>
+              <div class="provider-meta" id="prov-aws-meta">Resource type: aws_s3_bucket · 2 evaluated</div>
+            </div>
+          </div>
+          <div class="provider-cell">
+            <div class="provider-cell-top">
+              <span class="provider-kicker">Azure · Storage Account</span>
+              <span class="badge-stamp stamp-blocked" id="prov-azure-badge">1 VIOLATION (HIGH)</span>
+            </div>
+            <div>
+              <div class="provider-id">registry.terraform.io/hashicorp/azurerm</div>
+              <div class="provider-meta" id="prov-azure-meta">Resource type: azurerm_storage_account · 2 evaluated</div>
+            </div>
+          </div>
+          <div class="provider-cell">
+            <div class="provider-cell-top">
+              <span class="provider-kicker">GCP · Cloud Storage</span>
+              <span class="badge-stamp stamp-warn" id="prov-gcp-badge">1 VIOLATION (MEDIUM)</span>
+            </div>
+            <div>
+              <div class="provider-id">registry.terraform.io/hashicorp/google</div>
+              <div class="provider-meta" id="prov-gcp-meta">Resource type: google_storage_bucket · 2 evaluated</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-header-bar">
+          <div>
+            <h2 class="section-title" id="heading-backtest">Multi-Repository Blast-Radius Ledger</h2>
+            <p class="provider-meta">Deterministic evaluation across historical Terraform plan JSON snapshots (`format_version: 1.2`).</p>
+          </div>
+          <div class="kv-item">
+            <span class="kv-label">Filter Provider:</span>
+            <button type="button" class="deep-link-btn" data-filter-provider="all" aria-pressed="true">All (3)</button>
+            <button type="button" class="deep-link-btn" data-filter-provider="aws" aria-pressed="false">AWS (1)</button>
+            <button type="button" class="deep-link-btn" data-filter-provider="azurerm" aria-pressed="false">Azure (1)</button>
+            <button type="button" class="deep-link-btn" data-filter-provider="google" aria-pressed="false">GCP (1)</button>
+          </div>
+        </div>
+
+        <div class="table-scroll">
+          <table class="swiss-matrix" aria-label="Repository Backtest Results">
+            <thead>
+              <tr>
+                <th>Repository &amp; Plan Snapshot</th>
+                <th>Provider</th>
+                <th>Evaluated</th>
+                <th>CI/CD Gate Verdict</th>
+                <th>Triggered Rule &amp; Resource</th>
+                <th>Remediation Action</th>
+              </tr>
+            </thead>
+            <tbody id="backtest-tbody">
+              <tr data-provider="aws" data-row-patch="payments-aws" tabindex="0">
+                <td>
+                  <div class="cell-stack">
+                    <strong>repo_payments_aws</strong>
+                    <span class="code-inline">testdata/plans/repo_payments_aws.json</span>
+                  </div>
+                </td>
+                <td><span class="code-inline">hashicorp/aws</span></td>
+                <td class="tabular">
+                  <div class="cell-stack">
+                    <span>2 resources</span>
+                    <span class="provider-meta" id="row-eval-aws">1 pass · 1 fail</span>
+                  </div>
+                </td>
+                <td class="verdict-cell"><span class="badge-stamp stamp-blocked" id="row-badge-aws">[BLOCKED] 1 HIGH</span></td>
+                <td>
+                  <div class="cell-stack">
+                    <span class="code-inline" id="row-rule-aws">AWS-S3-ENCRYPT-001</span>
+                    <span class="mono-val" id="row-res-aws">aws_s3_bucket.unencrypted_reports</span>
+                  </div>
+                </td>
+                <td>
+                  <div class="cell-actions">
+                    <button type="button" class="deep-link-btn" data-open-patch="payments-aws">Preview HCL Patch &rarr;</button>
+                    <button type="button" class="deep-link-btn" data-goto-view="verify">Inspect Rule</button>
+                  </div>
+                </td>
+              </tr>
+              <tr data-provider="azurerm" data-row-patch="data-azure" tabindex="0">
+                <td>
+                  <div class="cell-stack">
+                    <strong>repo_data_azure</strong>
+                    <span class="code-inline">testdata/plans/repo_data_azure.json</span>
+                  </div>
+                </td>
+                <td><span class="code-inline">hashicorp/azurerm</span></td>
+                <td class="tabular">
+                  <div class="cell-stack">
+                    <span>2 resources</span>
+                    <span class="provider-meta" id="row-eval-azure">1 pass · 1 fail</span>
+                  </div>
+                </td>
+                <td class="verdict-cell"><span class="badge-stamp stamp-blocked" id="row-badge-azure">[BLOCKED] 1 HIGH</span></td>
+                <td>
+                  <div class="cell-stack">
+                    <span class="code-inline" id="row-rule-azure">AZURE-STORAGE-HTTPS-001</span>
+                    <span class="mono-val" id="row-res-azure">azurerm_storage_account.insecure_transfer</span>
+                  </div>
+                </td>
+                <td>
+                  <div class="cell-actions">
+                    <button type="button" class="deep-link-btn" data-open-patch="data-azure">Preview HCL Patch &rarr;</button>
+                    <button type="button" class="deep-link-btn" data-goto-view="verify">Inspect Rule</button>
+                  </div>
+                </td>
+              </tr>
+              <tr data-provider="google" data-row-patch="ml-gcp" tabindex="0">
+                <td>
+                  <div class="cell-stack">
+                    <strong>repo_ml_gcp</strong>
+                    <span class="code-inline">testdata/plans/repo_ml_gcp.json</span>
+                  </div>
+                </td>
+                <td><span class="code-inline">hashicorp/google</span></td>
+                <td class="tabular">
+                  <div class="cell-stack">
+                    <span>2 resources</span>
+                    <span class="provider-meta" id="row-eval-gcp">1 pass · 1 fail</span>
+                  </div>
+                </td>
+                <td class="verdict-cell"><span class="badge-stamp stamp-warn" id="row-badge-gcp">[BLOCKED] 1 MEDIUM</span></td>
+                <td>
+                  <div class="cell-stack">
+                    <span class="code-inline" id="row-rule-gcp">GCP-STORAGE-UBLA-001</span>
+                    <span class="mono-val" id="row-res-gcp">google_storage_bucket.open_training_data</span>
+                  </div>
+                </td>
+                <td>
+                  <div class="cell-actions">
+                    <button type="button" class="deep-link-btn" data-open-patch="ml-gcp">Preview HCL Patch &rarr;</button>
+                    <button type="button" class="deep-link-btn" data-goto-view="verify">Inspect Rule</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- =========================================================
+           STAGE B: LIVE POLICY & SCHEMA STUDIO (data-view="verify")
+           ========================================================= -->
+      <section id="panel-verify" class="stage-panel" aria-labelledby="heading-verify">
+        <div class="section-header-bar">
+          <div>
+            <h2 class="section-title" id="heading-verify">OPA Rego v1 AST &amp; Provider Schema Verifier</h2>
+            <p class="provider-meta">Static walk of `rc.change.after.&lt;attr&gt;` references against `testdata/schemas/multicloud_schema.json` to prevent silent fail-open rules.</p>
+          </div>
+          <div class="kv-item">
+            <span class="kv-label">Inspect Policy File:</span>
+            <button type="button" class="deep-link-btn" id="btn-pol-valid" data-select-policy="storage_encryption.rego" aria-pressed="true">
+              storage_encryption.rego (VALID)
+            </button>
+            <button type="button" class="deep-link-btn" id="btn-pol-broken" data-select-policy="broken_fail_open.rego" aria-pressed="false">
+              broken_fail_open.rego (2 FAIL-OPEN BUGS)
+            </button>
+            <button type="button" class="deep-link-btn" id="btn-toggle-editor" aria-pressed="false">
+              Edit Rego Source
+            </button>
+          </div>
+        </div>
+
+        <div id="verify-diag-banner" class="diagnostic-banner" hidden>
+          <strong>[FAIL-OPEN SCHEMA ERROR]</strong> Line 12-14 in <code>broken_fail_open.rego</code> references <code>rc.change.after.https_only_enabled</code> on <code>azurerm_storage_account</code>. Attribute does not exist in provider schema (Did you mean <code>https_traffic_only_enabled</code>?). Standard OPA silently evaluates undefined paths as <code>PASS</code>.
+        </div>
+
+        <div class="split-workbench">
+          <div class="pane-left">
+            <div class="pane-toolbar">
+              <h3 class="pane-heading" id="rego-pane-title">testdata/policies/storage_encryption.rego</h3>
+              <span class="badge-stamp stamp-pass" id="rego-ast-badge">[AST VALID] 0 SCHEMA TYPOS</span>
+            </div>
+            <div class="code-listing" id="rego-code-container" role="region" aria-label="Rego Policy Source">
+              <div class="code-line"><span class="code-ln">1</span><span class="code-src">package tfsim</span></div>
+              <div class="code-line"><span class="code-ln">2</span><span class="code-src">import rego.v1</span></div>
+              <div class="code-line"><span class="code-ln">3</span><span class="code-src"></span></div>
+              <div class="code-line"><span class="code-ln">4</span><span class="code-src"># Azure Storage Account: Require HTTPS traffic only enabled</span></div>
+              <div class="code-line"><span class="code-ln">5</span><span class="code-src">deny contains violation if {</span></div>
+              <div class="code-line"><span class="code-ln">6</span><span class="code-src">  some rc in input.resource_changes</span></div>
+              <div class="code-line"><span class="code-ln">7</span><span class="code-src">  rc.type == "azurerm_storage_account"</span></div>
+              <div class="code-line"><span class="code-ln">8</span><span class="code-src">  rc.change.after.https_traffic_only_enabled == false</span></div>
+              <div class="code-line"><span class="code-ln">9</span><span class="code-src">  violation := {</span></div>
+              <div class="code-line"><span class="code-ln">10</span><span class="code-src">    "rule_id": "AZURE-STORAGE-HTTPS-001",</span></div>
+              <div class="code-line"><span class="code-ln">11</span><span class="code-src">    "severity": "HIGH",</span></div>
+              <div class="code-line"><span class="code-ln">12</span><span class="code-src">    "remediation": {"attribute_path": ["https_traffic_only_enabled"], "suggested_value": true}</span></div>
+              <div class="code-line"><span class="code-ln">13</span><span class="code-src">  }</span></div>
+              <div class="code-line"><span class="code-ln">14</span><span class="code-src">}</span></div>
+            </div>
+
+            <div class="rego-editor-drawer" id="rego-editor-wrap" hidden>
+              <div class="pane-toolbar">
+                <h3 class="pane-heading">Live Rego v1 Sandbox Editor</h3>
+                <div class="cell-actions">
+                  <button type="button" class="tactile-btn cta-primary" id="btn-verify-live">
+                    Verify AST &amp; Backtest Live
+                  </button>
+                  <button type="button" class="tactile-btn" id="btn-reset-editor">
+                    Reset to File
+                  </button>
+                </div>
+              </div>
+              <textarea
+                id="rego-live-textarea"
+                class="rego-live-textarea"
+                aria-label="Live Rego v1 Policy Editor"
+                spellcheck="false"
+              ></textarea>
+            </div>
+          </div>
+
+          <aside class="pane-right" aria-label="Provider Schema Explorer">
+            <div class="pane-toolbar">
+              <h3 class="pane-heading">Provider Schema Tree · multicloud_schema.json</h3>
+              <span class="code-inline" id="schema-count-badge">3 Resource Schemas Loaded</span>
+            </div>
+            <ul class="schema-list" id="schema-tree-list">
+              <li class="schema-item">
+                <strong>azurerm_storage_account</strong> <span class="code-inline">hashicorp/azurerm</span>
+                <div class="provider-meta">
+                  &#10003; <code>https_traffic_only_enabled</code> : <code>bool</code> (Valid schema attribute)<br>
+                  &#10003; <code>min_tls_version</code> : <code>string</code><br>
+                  &#10007; <code>https_only_enabled</code> : <strong>UNDEFINED (Triggers SchemaDiagnostic)</strong>
+                </div>
+              </li>
+              <li class="schema-item">
+                <strong>aws_s3_bucket</strong> <span class="code-inline">hashicorp/aws</span>
+                <div class="provider-meta">
+                  &#10003; <code>server_side_encryption_configuration.rule.apply_server_side_encryption_by_default.sse_algorithm</code> : <code>string</code><br>
+                  &#10007; <code>invalid_encrypt</code> : <strong>UNDEFINED (Triggers SchemaDiagnostic)</strong>
+                </div>
+              </li>
+              <li class="schema-item">
+                <strong>google_storage_bucket</strong> <span class="code-inline">hashicorp/google</span>
+                <div class="provider-meta">
+                  &#10003; <code>uniform_bucket_level_access</code> : <code>bool</code> (Valid schema attribute)<br>
+                  &#10003; <code>encryption.default_kms_key_name</code> : <code>string</code>
+                </div>
+              </li>
+              <li class="schema-item">
+                <strong>Unit Test Fixture Assertions</strong>
+                <div class="provider-meta" id="fixture-assertions-meta">
+                  <code>-&#45;pass-fixtures testdata/plans/compliant_plan.json</code> &rarr; <strong>0 violations (PASS)</strong><br>
+                  <code>-&#45;fail-fixtures testdata/plans/non_compliant_plan.json</code> &rarr; <strong>3 violations caught (PASS)</strong>
+                </div>
+              </li>
+            </ul>
+          </aside>
+        </div>
+      </section>
+
+      <!-- =========================================================
+           STAGE C: SURGICAL HCL REMEDIATION REVIEWER (data-view="remediate")
+           ========================================================= -->
+      <section id="panel-remediate" class="stage-panel" aria-labelledby="heading-remediate">
+        <div class="section-header-bar">
+          <div>
+            <h2 class="section-title" id="heading-remediate">Surgical HCL AST Remediation Reviewer (`hclwrite`)</h2>
+            <p class="provider-meta">In-place AST mutation preserves existing developer comments and formatting while resolving policy violations.</p>
+          </div>
+          <div class="kv-item">
+            <span class="kv-label">Select Repository Patch:</span>
+            <button type="button" class="deep-link-btn" data-select-patch="payments-aws" aria-pressed="false">payments-aws/main.tf</button>
+            <button type="button" class="deep-link-btn" data-select-patch="data-azure" aria-pressed="true">data-azure/main.tf</button>
+            <button type="button" class="deep-link-btn" data-select-patch="ml-gcp" aria-pressed="false">ml-gcp/main.tf</button>
+          </div>
+        </div>
+
+        <div class="split-workbench">
+          <div class="pane-left">
+            <div class="pane-toolbar">
+              <h3 class="pane-heading" id="patch-file-title">Unified Git Diff · testdata/repos/data-azure/main.tf</h3>
+              <span class="badge-stamp stamp-pass" id="patch-status-badge">COMMENTS PRESERVED</span>
+            </div>
+            <div class="code-listing" id="hcl-diff-container" role="region" aria-label="Unified HCL Diff">
+              <div class="code-line"><span class="code-ln">14</span><span class="code-src"># Legacy data ingestion storage account (non-compliant HTTPS setting)</span></div>
+              <div class="code-line"><span class="code-ln">15</span><span class="code-src">resource "azurerm_storage_account" "insecure_transfer" {</span></div>
+              <div class="code-line"><span class="code-ln">16</span><span class="code-src">  name                     = "insecuretransfer"</span></div>
+              <div class="code-line"><span class="code-ln">17</span><span class="code-src">  resource_group_name      = "rg-data"</span></div>
+              <div class="code-line"><span class="code-ln">22</span><span class="code-src">  # Legacy toggle - must be remediated to true</span></div>
+              <div class="code-line line-del"><span class="code-ln">-23</span><span class="code-src">- https_traffic_only_enabled = false</span></div>
+              <div class="code-line line-add"><span class="code-ln">+23</span><span class="code-src">+ https_traffic_only_enabled = true</span></div>
+              <div class="code-line"><span class="code-ln">24</span><span class="code-src">}</span></div>
+            </div>
+          </div>
+
+          <aside class="pane-right" aria-label="Remediation Spec Details">
+            <div class="pane-toolbar">
+              <h3 class="pane-heading">Remediation Contract &amp; GitOps Export</h3>
+            </div>
+            <ul class="schema-list">
+              <li class="schema-item">
+                <strong>Target Resource Address</strong>
+                <div class="provider-meta" id="rem-resource-addr"><code>azurerm_storage_account.insecure_transfer</code></div>
+              </li>
+              <li class="schema-item">
+                <strong>AST Attribute Path &amp; Value</strong>
+                <div class="provider-meta" id="rem-attr-path"><code>["https_traffic_only_enabled"] = true</code></div>
+              </li>
+              <li class="schema-item">
+                <strong>Apply or Export Patch</strong>
+                <div class="verdict-actions">
+                  <button type="button" class="tactile-btn cta-primary" id="btn-apply-patch">
+                    Apply Patch &amp; Re-Verify Corpus (-&#45;write)
+                  </button>
+                  <button type="button" class="tactile-btn" id="btn-export-patch">
+                    Export .patch File
+                  </button>
+                </div>
+              </li>
+            </ul>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <footer class="ledger-footer">
+      <span>tf-sim · Local-First Terraform &amp; OpenTofu Policy Lifecycle Workbench</span>
+      <span>Candidate A: Basel Brass · Swiss Modular Grid · Seed 92.01°</span>
+    </footer>
+  </div>
+</body>
+</html>
