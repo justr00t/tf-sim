@@ -16,6 +16,8 @@ import (
 	"github.com/open-policy-agent/opa/v1/rego"
 )
 
+const maxCacheEntries = 64
+
 type preparedEntrypoint struct {
 	pkg        string
 	entrypoint string
@@ -29,18 +31,58 @@ type rawPolicyFile struct {
 
 // Evaluator implements in-memory Rego policy evaluation against PlanSnapshot models.
 type Evaluator struct {
-	mu    sync.RWMutex
-	cache map[string][]preparedEntrypoint
+	mu         sync.RWMutex
+	maxEntries int
+	cache      map[string][]preparedEntrypoint
+	order      []string
 }
 
 // NewEvaluator creates a new PolicyEvaluator instance.
 func NewEvaluator() *Evaluator {
 	return &Evaluator{
-		cache: make(map[string][]preparedEntrypoint),
+		cache:      make(map[string][]preparedEntrypoint),
+		maxEntries: maxCacheEntries,
 	}
 }
 
+// SetMaxCacheEntries sets the maximum number of cached query plans.
+// If n <= 0, the default maxCacheEntries (64) is used.
+func (e *Evaluator) SetMaxCacheEntries(n int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if n <= 0 {
+		e.maxEntries = maxCacheEntries
+	} else {
+		e.maxEntries = n
+	}
+	for len(e.order) > e.maxEntries {
+		oldest := e.order[0]
+		e.order = e.order[1:]
+		delete(e.cache, oldest)
+	}
+}
+
+// CacheLen returns the current number of cached query plans.
+func (e *Evaluator) CacheLen() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.cache)
+}
+
+// promoteKey moves key to the end of e.order (most recently used).
+// Caller MUST hold e.mu.Lock().
+func (e *Evaluator) promoteKey(key string) {
+	for i, k := range e.order {
+		if k == key {
+			e.order = append(e.order[:i], e.order[i+1:]...)
+			break
+		}
+	}
+	e.order = append(e.order, key)
+}
+
 var _ model.PolicyEvaluator = (*Evaluator)(nil)
+var _ model.ContentPolicyEvaluator = (*Evaluator)(nil)
 
 // EvaluatePlan evaluates the provided policy files against a PlanSnapshot.
 func (e *Evaluator) EvaluatePlan(ctx context.Context, policyPaths []string, snapshot *model.PlanSnapshot) (*model.EvalResult, error) {
@@ -52,6 +94,36 @@ func (e *Evaluator) EvaluatePlan(ctx context.Context, policyPaths []string, snap
 	}
 	if len(policyPaths) == 0 {
 		return nil, fmt.Errorf("at least one policy path must be provided")
+	}
+
+	policies := make([]model.PolicyContent, 0, len(policyPaths))
+	for _, p := range policyPaths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		content, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("read policy file %s: %w", p, err)
+		}
+		policies = append(policies, model.PolicyContent{
+			Path:    p,
+			Content: content,
+		})
+	}
+
+	return e.EvaluatePlanContents(ctx, policies, snapshot)
+}
+
+// EvaluatePlanContents evaluates in-memory Rego policy contents against a PlanSnapshot.
+func (e *Evaluator) EvaluatePlanContents(ctx context.Context, policies []model.PolicyContent, snapshot *model.PlanSnapshot) (*model.EvalResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if snapshot == nil {
+		return nil, fmt.Errorf("plan snapshot cannot be nil")
+	}
+	if len(policies) == 0 {
+		return nil, fmt.Errorf("at least one policy must be provided")
 	}
 
 	// 1. Dual-envelope input map construction (supporting both rc.change.after.<attr> and rc.after.<attr>)
@@ -82,7 +154,7 @@ func (e *Evaluator) EvaluatePlan(ctx context.Context, policyPaths []string, snap
 	}
 
 	// 2. Load or retrieve cached pre-compiled Rego queries per detected package and entrypoint
-	preparedQueries, err := e.getOrPrepareQueries(ctx, policyPaths)
+	preparedQueries, err := e.getOrPrepareQueries(ctx, policies)
 	if err != nil {
 		return nil, err
 	}
@@ -139,24 +211,24 @@ func (e *Evaluator) EvaluatePlan(ctx context.Context, policyPaths []string, snap
 	}, nil
 }
 
-func (e *Evaluator) getOrPrepareQueries(ctx context.Context, policyPaths []string) ([]preparedEntrypoint, error) {
-	rawFiles := make([]rawPolicyFile, 0, len(policyPaths))
+func (e *Evaluator) getOrPrepareQueries(ctx context.Context, policies []model.PolicyContent) ([]preparedEntrypoint, error) {
+	rawFiles := make([]rawPolicyFile, 0, len(policies))
 	hasher := sha256.New()
 
-	for _, p := range policyPaths {
+	for i, p := range policies {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		content, err := os.ReadFile(p)
-		if err != nil {
-			return nil, fmt.Errorf("read policy file %s: %w", p, err)
+		name := p.Path
+		if name == "" {
+			name = fmt.Sprintf("policy_%d.rego", i)
 		}
 		rawFiles = append(rawFiles, rawPolicyFile{
-			path:    p,
-			content: string(content),
+			path:    name,
+			content: string(p.Content),
 		})
-		fmt.Fprintf(hasher, "%d:%s:%d:", len(p), p, len(content))
-		hasher.Write(content)
+		fmt.Fprintf(hasher, "%d:%s:%d:", len(name), name, len(p.Content))
+		hasher.Write(p.Content)
 	}
 
 	cacheKey := hex.EncodeToString(hasher.Sum(nil))
@@ -165,6 +237,11 @@ func (e *Evaluator) getOrPrepareQueries(ctx context.Context, policyPaths []strin
 	if e.cache != nil {
 		if cached, ok := e.cache[cacheKey]; ok {
 			e.mu.RUnlock()
+			e.mu.Lock()
+			if _, stillCached := e.cache[cacheKey]; stillCached {
+				e.promoteKey(cacheKey)
+			}
+			e.mu.Unlock()
 			return cached, nil
 		}
 	}
@@ -241,7 +318,23 @@ func (e *Evaluator) getOrPrepareQueries(ctx context.Context, policyPaths []strin
 	if e.cache == nil {
 		e.cache = make(map[string][]preparedEntrypoint)
 	}
-	e.cache[cacheKey] = prepared
+	limit := e.maxEntries
+	if limit <= 0 {
+		limit = maxCacheEntries
+	}
+
+	if _, exists := e.cache[cacheKey]; exists {
+		e.promoteKey(cacheKey)
+		e.cache[cacheKey] = prepared
+	} else {
+		for len(e.order) >= limit {
+			oldest := e.order[0]
+			e.order = e.order[1:]
+			delete(e.cache, oldest)
+		}
+		e.cache[cacheKey] = prepared
+		e.order = append(e.order, cacheKey)
+	}
 	e.mu.Unlock()
 
 	return prepared, nil

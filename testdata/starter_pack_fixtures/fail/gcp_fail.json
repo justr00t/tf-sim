@@ -1,0 +1,233 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "google_storage_bucket.explicit_bad",
+      "mode": "managed",
+      "type": "google_storage_bucket",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "bad-gcs-bucket",
+          "location": "US",
+          "uniform_bucket_level_access": false,
+          "public_access_prevention": "inherited"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_storage_bucket.missing_attrs",
+      "mode": "managed",
+      "type": "google_storage_bucket",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "missing-gcs-bucket",
+          "location": "US"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_sql_database_instance.explicit_bad",
+      "mode": "managed",
+      "type": "google_sql_database_instance",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "bad-cloudsql",
+          "database_version": "POSTGRES_15",
+          "region": "us-central1",
+          "settings": [
+            {
+              "tier": "db-f1-micro",
+              "ip_configuration": [
+                {
+                  "ssl_mode": "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
+                }
+              ],
+              "backup_configuration": [
+                {
+                  "enabled": false
+                }
+              ]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_sql_database_instance.missing_attrs",
+      "mode": "managed",
+      "type": "google_sql_database_instance",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "missing-cloudsql",
+          "database_version": "POSTGRES_15",
+          "region": "us-central1",
+          "settings": [
+            {
+              "tier": "db-f1-micro"
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_compute_instance.explicit_bad",
+      "mode": "managed",
+      "type": "google_compute_instance",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "bad-vm",
+          "machine_type": "e2-medium",
+          "zone": "us-central1-a",
+          "can_ip_forward": true,
+          "shielded_instance_config": [
+            {
+              "enable_secure_boot": false
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_compute_instance.missing_attrs",
+      "mode": "managed",
+      "type": "google_compute_instance",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "missing-vm",
+          "machine_type": "e2-medium",
+          "zone": "us-central1-a"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_kms_crypto_key.explicit_bad",
+      "mode": "managed",
+      "type": "google_kms_crypto_key",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "bad-crypto-key",
+          "key_ring": "projects/demo/locations/global/keyRings/main",
+          "rotation_period": ""
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_kms_crypto_key.missing_attrs",
+      "mode": "managed",
+      "type": "google_kms_crypto_key",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "missing-crypto-key",
+          "key_ring": "projects/demo/locations/global/keyRings/main"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_compute_firewall.explicit_bad",
+      "mode": "managed",
+      "type": "google_compute_firewall",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "bad-firewall",
+          "network": "default",
+          "log_config": [
+            {
+              "metadata": "EXCLUDE_ALL_METADATA"
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_compute_firewall.missing_attrs",
+      "mode": "managed",
+      "type": "google_compute_firewall",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "missing-firewall",
+          "network": "default"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_storage_bucket.deleted_bad",
+      "mode": "managed",
+      "type": "google_storage_bucket",
+      "name": "deleted_bad",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "deleted-gcs-bucket",
+          "uniform_bucket_level_access": false,
+          "public_access_prevention": "inherited"
+        },
+        "after": {
+          "name": "deleted-gcs-bucket",
+          "uniform_bucket_level_access": false,
+          "public_access_prevention": "inherited"
+        },
+        "after_unknown": {}
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {}
+  }
+}

@@ -1,0 +1,273 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket_public_access_block.explicit_bad",
+      "mode": "managed",
+      "type": "aws_s3_bucket_public_access_block",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "bad-pab-bucket",
+          "block_public_acls": false,
+          "block_public_policy": false,
+          "ignore_public_acls": false,
+          "restrict_public_buckets": false
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_public_access_block.missing_attrs",
+      "mode": "managed",
+      "type": "aws_s3_bucket_public_access_block",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "missing-pab-bucket"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_server_side_encryption_configuration.explicit_bad",
+      "mode": "managed",
+      "type": "aws_s3_bucket_server_side_encryption_configuration",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "bad-sse-bucket",
+          "rule": [
+            {
+              "apply_server_side_encryption_by_default": [
+                {
+                  "sse_algorithm": "AES256"
+                }
+              ]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_server_side_encryption_configuration.missing_attrs",
+      "mode": "managed",
+      "type": "aws_s3_bucket_server_side_encryption_configuration",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "missing-sse-bucket"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_versioning.explicit_bad",
+      "mode": "managed",
+      "type": "aws_s3_bucket_versioning",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "bad-ver-bucket",
+          "versioning_configuration": [
+            {
+              "status": "Disabled"
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_versioning.missing_attrs",
+      "mode": "managed",
+      "type": "aws_s3_bucket_versioning",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "missing-ver-bucket"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_db_instance.explicit_bad",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "identifier": "bad-db",
+          "storage_encrypted": false,
+          "publicly_accessible": true,
+          "iam_database_authentication_enabled": false
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_db_instance.missing_attrs",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "identifier": "missing-db"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_ebs_volume.explicit_bad",
+      "mode": "managed",
+      "type": "aws_ebs_volume",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "availability_zone": "us-east-1a",
+          "size": 20,
+          "encrypted": false
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_ebs_volume.missing_attrs",
+      "mode": "managed",
+      "type": "aws_ebs_volume",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "availability_zone": "us-east-1a",
+          "size": 20
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_instance.explicit_bad",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "ami": "ami-0123456789abcdef0",
+          "instance_type": "t3.micro",
+          "ebs_optimized": false
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_instance.missing_attrs",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "ami": "ami-0123456789abcdef0",
+          "instance_type": "t3.micro"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_kms_key.explicit_bad",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "description": "bad key",
+          "enable_key_rotation": false
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_kms_key.missing_attrs",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "description": "missing rotation key"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_ebs_volume.deleted_bad",
+      "mode": "managed",
+      "type": "aws_ebs_volume",
+      "name": "deleted_bad",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "availability_zone": "us-east-1a",
+          "size": 10,
+          "encrypted": false
+        },
+        "after": {
+          "availability_zone": "us-east-1a",
+          "size": 10,
+          "encrypted": false
+        },
+        "after_unknown": {}
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {}
+  }
+}

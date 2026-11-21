@@ -1,0 +1,254 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "google_storage_bucket.compliant",
+      "mode": "managed",
+      "type": "google_storage_bucket",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "compliant-gcs-bucket",
+          "location": "US",
+          "uniform_bucket_level_access": true,
+          "public_access_prevention": "enforced"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_sql_database_instance.compliant",
+      "mode": "managed",
+      "type": "google_sql_database_instance",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "compliant-cloudsql",
+          "database_version": "POSTGRES_15",
+          "region": "us-central1",
+          "settings": [
+            {
+              "tier": "db-f1-micro",
+              "ip_configuration": [
+                {
+                  "ssl_mode": "ENCRYPTED_ONLY"
+                }
+              ],
+              "backup_configuration": [
+                {
+                  "enabled": true
+                }
+              ]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_compute_instance.compliant",
+      "mode": "managed",
+      "type": "google_compute_instance",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "compliant-vm",
+          "machine_type": "e2-medium",
+          "zone": "us-central1-a",
+          "can_ip_forward": false,
+          "shielded_instance_config": [
+            {
+              "enable_secure_boot": true
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_kms_crypto_key.compliant",
+      "mode": "managed",
+      "type": "google_kms_crypto_key",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "compliant-crypto-key",
+          "key_ring": "projects/demo/locations/global/keyRings/main",
+          "rotation_period": "7776000s"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_compute_firewall.compliant",
+      "mode": "managed",
+      "type": "google_compute_firewall",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "compliant-firewall",
+          "network": "default",
+          "log_config": [
+            {
+              "metadata": "INCLUDE_ALL_METADATA"
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_storage_bucket.deleted_noncompliant",
+      "mode": "managed",
+      "type": "google_storage_bucket",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "legacy-gcs-bucket",
+          "uniform_bucket_level_access": false,
+          "public_access_prevention": "inherited"
+        },
+        "after": null,
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_sql_database_instance.deleted_noncompliant",
+      "mode": "managed",
+      "type": "google_sql_database_instance",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "legacy-sql",
+          "settings": [
+            {
+              "ip_configuration": [
+                {
+                  "ssl_mode": "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
+                }
+              ],
+              "backup_configuration": [
+                {
+                  "enabled": false
+                }
+              ]
+            }
+          ]
+        },
+        "after": {
+          "name": "legacy-sql",
+          "settings": [
+            {
+              "ip_configuration": [
+                {
+                  "ssl_mode": "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
+                }
+              ],
+              "backup_configuration": [
+                {
+                  "enabled": false
+                }
+              ]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_compute_instance.deleted_noncompliant",
+      "mode": "managed",
+      "type": "google_compute_instance",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "legacy-vm",
+          "can_ip_forward": true,
+          "shielded_instance_config": [
+            {
+              "enable_secure_boot": false
+            }
+          ]
+        },
+        "after": null,
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_kms_crypto_key.deleted_noncompliant",
+      "mode": "managed",
+      "type": "google_kms_crypto_key",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "legacy-key",
+          "rotation_period": ""
+        },
+        "after": {
+          "name": "legacy-key",
+          "rotation_period": ""
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "google_compute_firewall.deleted_noncompliant",
+      "mode": "managed",
+      "type": "google_compute_firewall",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/google",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "legacy-fw",
+          "log_config": [
+            {
+              "metadata": "EXCLUDE_ALL_METADATA"
+            }
+          ]
+        },
+        "after": {
+          "name": "legacy-fw",
+          "log_config": [
+            {
+              "metadata": "EXCLUDE_ALL_METADATA"
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {}
+  }
+}

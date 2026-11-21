@@ -119,6 +119,12 @@ type RemediationPatch struct {
 	UnifiedDiff     string `json:"unified_diff"`
 }
 
+// PolicyContent represents an in-memory Rego policy source paired with its logical or filesystem path.
+type PolicyContent struct {
+	Path    string `json:"path"`
+	Content []byte `json:"content"`
+}
+
 // PlanParser defines the contract for plan and provider schema parsing.
 type PlanParser interface {
 	ParsePlanFile(ctx context.Context, path string, repoName string) (*PlanSnapshot, error)
@@ -131,14 +137,33 @@ type ASTVerifier interface {
 	VerifyPolicies(ctx context.Context, policyPaths []string, schemas ProviderSchemaMap) (*VerificationResult, error)
 }
 
+// ContentASTVerifier extends ASTVerifier with in-memory PolicyContent verification methods.
+type ContentASTVerifier interface {
+	ASTVerifier
+	VerifyPolicyContents(ctx context.Context, policy PolicyContent, schemas ProviderSchemaMap) (*VerificationResult, error)
+	VerifyPoliciesContents(ctx context.Context, policies []PolicyContent, schemas ProviderSchemaMap) (*VerificationResult, error)
+}
+
 // PolicyEvaluator defines the contract for running Rego policies against a PlanSnapshot.
 type PolicyEvaluator interface {
 	EvaluatePlan(ctx context.Context, policyPaths []string, snapshot *PlanSnapshot) (*EvalResult, error)
 }
 
+// ContentPolicyEvaluator extends PolicyEvaluator with in-memory PolicyContent evaluation.
+type ContentPolicyEvaluator interface {
+	PolicyEvaluator
+	EvaluatePlanContents(ctx context.Context, policies []PolicyContent, snapshot *PlanSnapshot) (*EvalResult, error)
+}
+
 // BacktestRunner defines the contract for cross-repo blast-radius evaluation.
 type BacktestRunner interface {
 	RunBacktest(ctx context.Context, policyPaths []string, snapshots []*PlanSnapshot) (*BlastRadiusReport, error)
+}
+
+// ContentBacktestRunner extends BacktestRunner with in-memory PolicyContent backtesting.
+type ContentBacktestRunner interface {
+	BacktestRunner
+	RunBacktestContents(ctx context.Context, policies []PolicyContent, snapshots []*PlanSnapshot) (*BlastRadiusReport, error)
 }
 
 // RemediationGenerator defines the contract for surgical HCL AST patching.

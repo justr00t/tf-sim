@@ -1,0 +1,163 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "azurerm_storage_account.explicit_bad",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "badstorage01",
+          "https_traffic_only_enabled": false,
+          "min_tls_version": "TLS1_0"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_storage_account.missing_attrs",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "missingstorage01"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_mssql_server.explicit_bad",
+      "mode": "managed",
+      "type": "azurerm_mssql_server",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "bad-mssql-srv",
+          "minimum_tls_version": "1.0"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_mssql_server.missing_attrs",
+      "mode": "managed",
+      "type": "azurerm_mssql_server",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "missing-mssql-srv"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_postgresql_flexible_server.explicit_bad",
+      "mode": "managed",
+      "type": "azurerm_postgresql_flexible_server",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "bad-psql-flex",
+          "public_network_access_enabled": true,
+          "backup_retention_days": 3
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_postgresql_flexible_server.missing_attrs",
+      "mode": "managed",
+      "type": "azurerm_postgresql_flexible_server",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "missing-psql-flex"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_key_vault.explicit_bad",
+      "mode": "managed",
+      "type": "azurerm_key_vault",
+      "name": "explicit_bad",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "bad-kv-01",
+          "soft_delete_retention_days": 7,
+          "purge_protection_enabled": false,
+          "enable_rbac_authorization": false
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_key_vault.missing_attrs",
+      "mode": "managed",
+      "type": "azurerm_key_vault",
+      "name": "missing_attrs",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "missing-kv-01"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_storage_account.deleted_bad",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "deleted_bad",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "deletedstorage01",
+          "https_traffic_only_enabled": false,
+          "min_tls_version": "TLS1_0"
+        },
+        "after": {
+          "name": "deletedstorage01",
+          "https_traffic_only_enabled": false,
+          "min_tls_version": "TLS1_0"
+        },
+        "after_unknown": {}
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {}
+  }
+}
