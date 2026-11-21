@@ -99,6 +99,9 @@ outputs:
   patches-count:
     description: "Number of surgical HCL remediation patches generated"
     value: ${{ steps.evaluate.outputs.patches-count }}
+  skipped-count:
+    description: "Number of policy violations skipped from auto-remediation with manual-review diagnostics"
+    value: ${{ steps.evaluate.outputs.skipped-count }}
   sarif-file:
     description: "Path to generated SARIF v2.1.0 file, or empty if neither eval nor verify ran"
     value: ${{ steps.evaluate.outputs.sarif-file }}

@@ -287,13 +287,14 @@ func newBacktestCmd(stdout, stderr io.Writer) *cobra.Command {
 
 func newRemediateCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
-		policyPaths []string
-		packNames   []string
-		planPath    string
-		tfDir       string
-		repoName    string
-		writeFlag   bool
-		format      string
+		policyPaths    []string
+		packNames      []string
+		planPath       string
+		tfDir          string
+		repoName       string
+		writeFlag      bool
+		includeSkipped bool
+		format         string
 	)
 
 	cmd := &cobra.Command{
@@ -332,12 +333,17 @@ func newRemediateCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 
 			patcher := remediate.NewPatcher(remediate.WithWriteChanges(writeFlag))
-			patches, err := patcher.GeneratePatches(ctx, tfDir, evalRes.Violations)
+			rep, err := patcher.GenerateRemediationReport(ctx, tfDir, evalRes.Violations)
 			if err != nil {
-				return fmt.Errorf("generating remediation patches: %w", err)
+				return fmt.Errorf("generating remediation report: %w", err)
 			}
 
-			out, err := report.FormatRemediationPatches(patches, format)
+			var out string
+			if strings.EqualFold(strings.TrimSpace(format), report.FormatJSON) && !includeSkipped {
+				out, err = report.FormatRemediationPatches(rep.Patches, format)
+			} else {
+				out, err = report.FormatRemediationReport(rep, format)
+			}
 			if err != nil {
 				return err
 			}
@@ -353,6 +359,7 @@ func newRemediateCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&tfDir, "tf-dir", "", "Directory containing Terraform (.tf) source files")
 	cmd.Flags().StringVar(&repoName, "repo", "", "Repository name for reporting (defaults to plan filename stem)")
 	cmd.Flags().BoolVar(&writeFlag, "write", false, "Write patched HCL changes back to .tf files in-place")
+	cmd.Flags().BoolVar(&includeSkipped, "include-skipped", false, "Include skipped/manual-review diagnostics and summary envelope in --format json output")
 	cmd.Flags().StringVar(&format, "format", report.FormatMarkdown, "Output format (table|json|markdown|sarif)")
 	_ = cmd.MarkFlagRequired("plan")
 	_ = cmd.MarkFlagRequired("tf-dir")

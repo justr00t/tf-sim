@@ -1055,3 +1055,143 @@ func TestReadme_CICDIntegrationSnippets(t *testing.T) {
 		}
 	}
 }
+
+func TestGitHubAction_RunSh_SkippedDiagnosticsAndLegacyArrayCompat(t *testing.T) {
+	bash := resolveBash(t)
+	_ = resolveNode(t)
+	root := repoRoot(t)
+	runScript := filepath.ToSlash(filepath.Join(root, ".github", "action", "run.sh"))
+
+	runMockCase := func(t *testing.T, remJSON string, wantIncludeSkippedFlag bool) (map[string]string, string) {
+		t.Helper()
+		mockBinDir := t.TempDir()
+		mockScript := `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const cmd = args[0];
+const fmtIdx = args.indexOf("--format");
+const fmt = fmtIdx >= 0 ? args[fmtIdx + 1] : "table";
+
+if (cmd === "eval") {
+  if (fmt === "json") {
+    process.stdout.write(JSON.stringify({ passed: false, violations: [{ rule_id: "TEST-001", severity: "high", resource: "aws_s3_bucket.b", message: "bad" }] }));
+    process.exit(1);
+  }
+  if (fmt === "sarif") {
+    process.stdout.write(JSON.stringify({ version: "2.1.0", runs: [{ results: [{ ruleId: "TEST-001" }] }] }));
+    process.exit(1);
+  }
+  process.stdout.write("## Eval\n1 violation\n");
+  process.exit(1);
+}
+if (cmd === "remediate") {
+  if (fmt === "json") {
+    if (process.env.EXPECT_INCLUDE_SKIPPED === "true" && !args.includes("--include-skipped")) {
+      process.stderr.write("missing --include-skipped flag");
+      process.exit(2);
+    }
+    process.stdout.write(process.env.MOCK_REM_JSON);
+    process.exit(0);
+  }
+  process.stdout.write("### Patch 1\n" + String.fromCharCode(96).repeat(3) + "diff\n+  encrypted = true\n" + String.fromCharCode(96).repeat(3) + "\n");
+  process.exit(0);
+}
+process.exit(0);
+`
+		mockPath := filepath.Join(mockBinDir, "tf-sim")
+		if err := os.WriteFile(mockPath, []byte(mockScript), 0o755); err != nil {
+			t.Fatalf("write mock tf-sim: %v", err)
+		}
+		if runtime.GOOS == "windows" {
+			cmdShim := "@echo off\r\nnode \"" + mockPath + "\" %*\r\n"
+			if err := os.WriteFile(filepath.Join(mockBinDir, "tf-sim.cmd"), []byte(cmdShim), 0o600); err != nil {
+				t.Fatalf("write tf-sim.cmd: %v", err)
+			}
+		}
+
+		tmpOut := t.TempDir()
+		ghOutput := filepath.Join(tmpOut, "github_output.txt")
+		_ = os.WriteFile(ghOutput, nil, 0o600)
+
+		expectFlag := "false"
+		if wantIncludeSkippedFlag {
+			expectFlag = "true"
+		}
+
+		cmd := exec.Command(bash, runScript)
+		cmd.Env = append(os.Environ(),
+			"PATH="+mockBinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"INPUT_MODE=audit",
+			"INPUT_PACK=aws",
+			"INPUT_PLAN=plan.json",
+			"INPUT_RUN_VERIFY=false",
+			"INPUT_REMEDIATE=true",
+			"INPUT_WORKING_DIRECTORY="+filepath.ToSlash(root),
+			"RUNNER_TEMP="+filepath.ToSlash(tmpOut),
+			"GITHUB_OUTPUT="+filepath.ToSlash(ghOutput),
+			"MOCK_REM_JSON="+remJSON,
+			"EXPECT_INCLUDE_SKIPPED="+expectFlag,
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("run.sh failed: %v\n%s", err, string(out))
+		}
+
+		outputs := parseGitHubOutput(t, ghOutput)
+		mdBytes, err := os.ReadFile(outputs["markdown-file"])
+		if err != nil {
+			t.Fatalf("read markdown-file: %v", err)
+		}
+		return outputs, string(mdBytes)
+	}
+
+	t.Run("ReportObject_ZeroPatches_TwoSkipped", func(t *testing.T) {
+		payload := `{"patches":[],"skipped":[{"rule_id":"aws-s3-pab-acls","severity":"HIGH","resource_address":"module.ext.aws_s3_bucket_public_access_block.this","reason":"external_module_source","detail":"External | registry\nmodule","guidance":"Pass input | override"},{"rule_id":"gcp-sql-ssl","severity":"HIGH","resource_address":"google_sql_database_instance.db","reason":"missing_remediation_metadata","detail":"Advisory rule","guidance":"Enable SSL"}],"summary":{"total_violations":2,"patched_count":0,"skipped_count":2}}`
+		outputs, md := runMockCase(t, payload, true)
+
+		if outputs["patches-count"] != "0" {
+			t.Errorf("patches-count = %q, want 0", outputs["patches-count"])
+		}
+		if outputs["skipped-count"] != "2" {
+			t.Errorf("skipped-count = %q, want 2", outputs["skipped-count"])
+		}
+		if !strings.Contains(md, "| **Manual Review (`remediate`)** | 2 |") {
+			t.Errorf("summary.md missing Manual Review row:\n%s", md)
+		}
+		if !strings.Contains(md, "Manual Remediation Diagnostics (2 skipped violation(s))") {
+			t.Errorf("summary.md missing Manual Remediation Diagnostics details block:\n%s", md)
+		}
+		if strings.Contains(md, "Surgical HCL Auto-Remediation Diff") {
+			t.Errorf("summary.md should not render Surgical HCL Auto-Remediation Diff when patches-count=0:\n%s", md)
+		}
+		if !strings.Contains(md, `\|`) {
+			t.Errorf("expected escaped pipe in manual-review table:\n%s", md)
+		}
+	})
+
+	t.Run("ReportObject_OnePatch_OneSkipped", func(t *testing.T) {
+		payload := `{"patches":[{"file_path":"main.tf","resource_address":"aws_ebs_volume.a"}],"skipped":[{"rule_id":"gcp-sql-ssl","severity":"HIGH","resource_address":"google_sql_database_instance.db","reason":"missing_remediation_metadata","detail":"Advisory rule","guidance":"Enable SSL"}],"summary":{"total_violations":2,"patched_count":1,"skipped_count":1}}`
+		outputs, md := runMockCase(t, payload, true)
+
+		if outputs["patches-count"] != "1" || outputs["skipped-count"] != "1" {
+			t.Errorf("unexpected counts: patches=%q skipped=%q", outputs["patches-count"], outputs["skipped-count"])
+		}
+		if !strings.Contains(md, "Surgical HCL Auto-Remediation Diff (1 patch(es))") {
+			t.Errorf("summary.md missing patch details block:\n%s", md)
+		}
+		if !strings.Contains(md, "Manual Remediation Diagnostics (1 skipped violation(s))") {
+			t.Errorf("summary.md missing skipped details block:\n%s", md)
+		}
+	})
+
+	t.Run("LegacyArray_BackwardsCompat", func(t *testing.T) {
+		payload := `[{"file_path":"main.tf","resource_address":"aws_ebs_volume.a"}]`
+		outputs, md := runMockCase(t, payload, false)
+
+		if outputs["patches-count"] != "1" || outputs["skipped-count"] != "0" {
+			t.Errorf("unexpected counts for legacy array: patches=%q skipped=%q", outputs["patches-count"], outputs["skipped-count"])
+		}
+		if strings.Contains(md, "Manual Remediation Diagnostics") {
+			t.Errorf("summary.md should not render Manual Remediation Diagnostics for legacy array:\n%s", md)
+		}
+	})
+}

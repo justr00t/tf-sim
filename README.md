@@ -172,7 +172,7 @@ See what would break across your organization's AWS, Azure, and GCP repositories
 ```
 
 ### 4. Generate Surgical HCL Auto-Remediation Diffs (`remediate`)
-Generate a unified Git diff (or pass `--write` to update `.tf` files in-place while preserving comments):
+Generate a unified Git diff (or pass `--write` to update `.tf` files in-place while preserving comments). In `table`, `markdown`, and `sarif` formats, `remediate` surfaces both auto-generated patches and manual-review diagnostics for unpatchable violations; pass `--include-skipped` with `--format json` to emit the full `RemediationReport` envelope (`{patches, skipped, summary}`) instead of the default patch array:
 
 ```bash
 ./tf-sim remediate \
@@ -180,7 +180,24 @@ Generate a unified Git diff (or pass `--write` to update `.tf` files in-place wh
   --plan testdata/plans/repo_payments_aws.json \
   --tf-dir testdata/repos/payments-aws \
   --format markdown
+
+# Emit full JSON report including skipped/manual-review diagnostics and summary counts:
+./tf-sim remediate \
+  --policy testdata/policies/storage_encryption.rego \
+  --plan testdata/plans/repo_payments_aws.json \
+  --tf-dir testdata/repos/payments-aws \
+  --include-skipped \
+  --format json
 ```
+
+When a violation cannot be safely auto-patched, `tf-sim` leaves your `.tf` files untouched and emits one of 7 deterministic skip reason codes with actionable guidance:
+- `external_module_source`: Resource belongs to a remote or registry module (`terraform-aws-modules/...`, `git::...`, etc.).
+- `missing_remediation_metadata`: Advisory rule omits a `remediation` block or `attribute_path`.
+- `unsupported_expression`: Target attribute or block uses dynamic/non-literal HCL (`var.*`, `local.*`, `dynamic`, conditionals, functions, or ambiguous nested blocks).
+- `unresolved_local_module`: Local `module` call has a missing `source` or zero `.tf` files at the resolved path.
+- `resource_block_not_found`: Target `resource` block (or read-only `data.` source) does not exist in the resolved `.tf` directory.
+- `path_traversal_blocked`: Module `source` escapes `--tf-dir` or traverses a symlink segment.
+- `invalid_resource_address`: Violation resource address is empty or malformed.
 
 ### 5. Launch the Local-First Web Control Plane (`serve` / `ui`)
 Start the embedded web workbench on `http://127.0.0.1:8080` to inspect the multi-repo blast-radius ledger, upload your own `plan.json` / `.rego` / `.tf` files directly from the browser (`+ Load / Upload Files`), live-edit Rego policies with real-time schema verification, and preview or export `.patch` files:
@@ -276,7 +293,7 @@ Adopt `tf-sim` across existing repositories without blocking engineering teams o
 #### Action Inputs & Outputs Reference
 
 - **Inputs**: `version` (default `'latest'`), `binary-path`, `mode` (`'enforce'`), `policy`, `pack`, `plan`, `schema`, `run-verify` (`'true'`), `pass-fixtures`, `fail-fixtures`, `remediate` (`'true'`), `tf-dir` (`'.'`), `repo-name`, `working-directory` (`'.'`), `comment-pr` (`'true'`), `comment-key` (`'default'`), `upload-sarif` (`'false'`), `sarif-category` (`'tf-sim'`), `github-token` (`'${{ github.token }}'`).
-- **Outputs**: `verify-exit-code`, `eval-exit-code`, `exit-code`, `violations-count`, `patches-count`, `sarif-file`, `markdown-file`.
+- **Outputs**: `verify-exit-code`, `eval-exit-code`, `exit-code`, `violations-count`, `patches-count`, `skipped-count`, `sarif-file`, `markdown-file`.
 
 ---
 
