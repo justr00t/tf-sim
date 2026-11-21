@@ -20,6 +20,7 @@ import (
 	"github.com/justr00t/tf-sim/internal/policy"
 	"github.com/justr00t/tf-sim/internal/remediate"
 	"github.com/justr00t/tf-sim/internal/report"
+	"github.com/justr00t/tf-sim/internal/scrubber"
 	"github.com/justr00t/tf-sim/internal/server"
 	"github.com/justr00t/tf-sim/internal/verifier"
 	"github.com/spf13/cobra"
@@ -65,7 +66,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return ExitOK
 }
 
-// NewRootCmd constructs the root cobra.Command for tf-sim with verify, eval, backtest, remediate, packs, and serve subcommands.
+// NewRootCmd constructs the root cobra.Command for tf-sim with verify, eval, backtest, remediate, scrub, packs, and serve subcommands.
 func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:           "tf-sim",
@@ -85,6 +86,7 @@ func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newEvalCmd(stdout, stderr),
 		newBacktestCmd(stdout, stderr),
 		newRemediateCmd(stdout, stderr),
+		newScrubCmd(stdout, stderr),
 		newPacksCmd(stdout, stderr),
 		newServeCmd(stdout, stderr),
 	)
@@ -349,6 +351,96 @@ func newRemediateCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&format, "format", report.FormatMarkdown, "Output format (table|json|markdown|sarif)")
 	_ = cmd.MarkFlagRequired("plan")
 	_ = cmd.MarkFlagRequired("tf-dir")
+
+	return cmd
+}
+
+func newScrubCmd(stdout, _ io.Writer) *cobra.Command {
+	var (
+		planPath   string
+		outPath    string
+		redactKeys []string
+		pretty     bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "scrub",
+		Short: "Sanitize a Terraform/OpenTofu plan JSON by stripping state/config bloat and redacting secrets",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			planPath = strings.TrimSpace(planPath)
+			outPath = strings.TrimSpace(outPath)
+
+			if planPath == "" {
+				return fmt.Errorf("--plan is required")
+			}
+			if cmd.Flags().Changed("redact-key") && len(redactKeys) == 0 {
+				return fmt.Errorf("--redact-key value cannot be empty")
+			}
+			for _, rk := range redactKeys {
+				if strings.TrimSpace(rk) == "" {
+					return fmt.Errorf("--redact-key value cannot be empty")
+				}
+			}
+
+			opts := []scrubber.Option{
+				scrubber.WithRedactKeys(redactKeys...),
+			}
+			if pretty {
+				opts = append(opts, scrubber.WithIndent("  "))
+			}
+			s := scrubber.NewScrubber(opts...)
+
+			readFromStdin := planPath == "-"
+			writeToStdout := outPath == "" || outPath == "-"
+
+			switch {
+			case !readFromStdin && !writeToStdout:
+				if _, err := s.ScrubFile(ctx, planPath, outPath); err != nil {
+					return fmt.Errorf("scrubbing plan: %w", err)
+				}
+				return nil
+
+			case readFromStdin && !writeToStdout:
+				if _, err := s.ScrubReaderToFile(ctx, cmd.InOrStdin(), outPath); err != nil {
+					return fmt.Errorf("scrubbing plan: %w", err)
+				}
+				return nil
+
+			case readFromStdin && writeToStdout:
+				if _, err := s.ScrubStream(ctx, cmd.InOrStdin(), stdout); err != nil {
+					return fmt.Errorf("scrubbing plan: %w", err)
+				}
+				return nil
+
+			default:
+				fi, err := os.Stat(planPath)
+				if err != nil {
+					return fmt.Errorf("scrubbing plan: stat plan file %s: %w", planPath, err)
+				}
+				if fi.IsDir() {
+					return fmt.Errorf("scrubbing plan: path is a directory, not a file: %s", planPath)
+				}
+				f, err := os.Open(planPath)
+				if err != nil {
+					return fmt.Errorf("scrubbing plan: open plan file %s: %w", planPath, err)
+				}
+				defer f.Close()
+
+				if _, err := s.ScrubStream(ctx, f, stdout); err != nil {
+					return fmt.Errorf("scrubbing plan: %w", err)
+				}
+				return nil
+			}
+		},
+	}
+
+	cmd.Flags().StringVar(&planPath, "plan", "", "Path to Terraform/OpenTofu plan JSON file (or '-' for stdin)")
+	cmd.Flags().StringVar(&outPath, "out", "", "Path to write scrubbed plan JSON (defaults to stdout, or '-' for stdout)")
+	cmd.Flags().StringSliceVar(&redactKeys, "redact-key", nil, "Additional attribute or map key name(s) to redact with [REDACTED]")
+	cmd.Flags().BoolVar(&pretty, "pretty", false, "Pretty-print scrubbed JSON output with 2-space indentation")
+	_ = cmd.MarkFlagRequired("plan")
 
 	return cmd
 }
