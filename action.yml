@@ -1,0 +1,177 @@
+name: "tf-sim Terraform & OpenTofu Policy Engine"
+author: "justr00t"
+description: "Verify Rego policies, evaluate Terraform/OpenTofu plans, preview surgical HCL remediation diffs, post sticky PR comments, and upload SARIF v2.1.0 reports."
+branding:
+  icon: "shield"
+  color: "yellow"
+
+inputs:
+  version:
+    description: "Pinned tf-sim release tag (e.g. v0.1.0) or 'latest'"
+    required: false
+    default: "latest"
+  binary-path:
+    description: "Optional path to a pre-built tf-sim binary (skips download when non-empty)"
+    required: false
+    default: ""
+  mode:
+    description: "Rollout mode: audit | warn | enforce"
+    required: false
+    default: "enforce"
+  policy:
+    description: "Comma- or newline-separated .rego file or directory path(s)"
+    required: false
+    default: ""
+  pack:
+    description: "Comma-separated bundled starter pack name(s) (aws, azure, gcp, all)"
+    required: false
+    default: ""
+  plan:
+    description: "Path to Terraform/OpenTofu plan JSON file (plan.json)"
+    required: false
+    default: ""
+  schema:
+    description: "Optional path to provider schema JSON (schema.json) for verify"
+    required: false
+    default: ""
+  run-verify:
+    description: "Run tf-sim verify prior to eval (true | false)"
+    required: false
+    default: "true"
+  pass-fixtures:
+    description: "Optional comma- or newline-separated --pass-fixtures path(s) for verify"
+    required: false
+    default: ""
+  fail-fixtures:
+    description: "Optional comma- or newline-separated --fail-fixtures path(s) for verify"
+    required: false
+    default: ""
+  remediate:
+    description: "Generate read-only surgical HCL diff preview on violations (true | false)"
+    required: false
+    default: "true"
+  tf-dir:
+    description: "Terraform .tf directory passed to tf-sim remediate --tf-dir"
+    required: false
+    default: "."
+  repo-name:
+    description: "Optional --repo override (defaults to GITHUB_REPOSITORY)"
+    required: false
+    default: ""
+  working-directory:
+    description: "Working directory relative to repository root"
+    required: false
+    default: "."
+  comment-pr:
+    description: "Post or update sticky PR comment on pull_request / pull_request_target (true | false)"
+    required: false
+    default: "true"
+  comment-key:
+    description: "Scope key for sticky PR comment marker (supports multi-stack monorepos)"
+    required: false
+    default: "default"
+  upload-sarif:
+    description: "Upload SARIF v2.1.0 report via github/codeql-action/upload-sarif@v4 (true | false)"
+    required: false
+    default: "false"
+  sarif-category:
+    description: "Category passed to upload-sarif"
+    required: false
+    default: "tf-sim"
+  github-token:
+    description: "GitHub token for latest release API lookup and sticky PR comments"
+    required: false
+    default: "${{ github.token }}"
+
+outputs:
+  verify-exit-code:
+    description: "Raw exit code from tf-sim verify (0, 1, 2, or skipped)"
+    value: ${{ steps.evaluate.outputs.verify-exit-code }}
+  eval-exit-code:
+    description: "Raw exit code from tf-sim eval (0, 1, 2, or skipped)"
+    value: ${{ steps.evaluate.outputs.eval-exit-code }}
+  exit-code:
+    description: "Effective exit code after applying rollout mode (0, 1, or 2)"
+    value: ${{ steps.evaluate.outputs.exit-code }}
+  violations-count:
+    description: "Number of plan policy violations detected"
+    value: ${{ steps.evaluate.outputs.violations-count }}
+  patches-count:
+    description: "Number of surgical HCL remediation patches generated"
+    value: ${{ steps.evaluate.outputs.patches-count }}
+  sarif-file:
+    description: "Path to generated SARIF v2.1.0 file, or empty if neither eval nor verify ran"
+    value: ${{ steps.evaluate.outputs.sarif-file }}
+  markdown-file:
+    description: "Path to generated sticky Markdown summary file"
+    value: ${{ steps.evaluate.outputs.markdown-file }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: install
+      name: Install tf-sim binary
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_BINARY_PATH: ${{ inputs.binary-path }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: bash "${GITHUB_ACTION_PATH}/.github/action/install.sh"
+
+    - id: evaluate
+      name: Run tf-sim verify, eval, and remediation preview
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_POLICY: ${{ inputs.policy }}
+        INPUT_PACK: ${{ inputs.pack }}
+        INPUT_PLAN: ${{ inputs.plan }}
+        INPUT_SCHEMA: ${{ inputs.schema }}
+        INPUT_RUN_VERIFY: ${{ inputs.run-verify }}
+        INPUT_PASS_FIXTURES: ${{ inputs.pass-fixtures }}
+        INPUT_FAIL_FIXTURES: ${{ inputs.fail-fixtures }}
+        INPUT_REMEDIATE: ${{ inputs.remediate }}
+        INPUT_TF_DIR: ${{ inputs.tf-dir }}
+        INPUT_REPO_NAME: ${{ inputs.repo-name }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        INPUT_COMMENT_PR: ${{ inputs.comment-pr }}
+        INPUT_COMMENT_KEY: ${{ inputs.comment-key }}
+        INPUT_UPLOAD_SARIF: ${{ inputs.upload-sarif }}
+        TFSIM_DEFER_VIOLATION_EXIT: "true"
+        TFSIM_BIN: ${{ steps.install.outputs.binary-path }}
+      run: bash "${GITHUB_ACTION_PATH}/.github/action/run.sh"
+
+    - id: comment
+      name: Post or update sticky PR comment
+      if: inputs.comment-pr == 'true' && steps.evaluate.outputs.has-comment == 'true' && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
+      uses: actions/github-script@v9
+      env:
+        COMMENT_BODY_FILE: ${{ steps.evaluate.outputs.markdown-file }}
+        COMMENT_MARKER: ${{ steps.evaluate.outputs.comment-marker }}
+        ACTION_ROOT: ${{ github.action_path }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const path = require("path");
+          const postComment = require(path.join(process.env.ACTION_ROOT, ".github/action/comment.cjs"));
+          await postComment({ github, context, core });
+
+    - id: sarif
+      name: Upload SARIF report to GitHub Code Scanning
+      if: inputs.upload-sarif == 'true' && steps.evaluate.outputs.has-sarif == 'true' && github.event.pull_request.head.repo.fork != true
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ steps.evaluate.outputs.sarif-file }}
+        category: ${{ inputs.sarif-category }}
+
+    - id: enforce-gate
+      name: Enforce rollout mode gate
+      shell: bash
+      env:
+        FINAL_EXIT_CODE: ${{ steps.evaluate.outputs.exit-code }}
+        INPUT_MODE: ${{ inputs.mode }}
+      run: |
+        if [ "${FINAL_EXIT_CODE}" != "0" ]; then
+          echo "::error::tf-sim policy check failed in '${INPUT_MODE}' mode (exit code ${FINAL_EXIT_CODE})."
+          exit "${FINAL_EXIT_CODE}"
+        fi
