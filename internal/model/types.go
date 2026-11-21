@@ -1,6 +1,9 @@
 package model
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // ResourceChange represents a single cloud-agnostic resource mutation extracted from a Terraform plan.
 type ResourceChange struct {
@@ -169,4 +172,22 @@ type ContentBacktestRunner interface {
 // RemediationGenerator defines the contract for surgical HCL AST patching.
 type RemediationGenerator interface {
 	GeneratePatches(ctx context.Context, tfDir string, violations []PolicyViolation) ([]RemediationPatch, error)
+}
+
+// ScrubSummary summarizes the streaming redaction and sanitization pass over a Terraform plan.
+type ScrubSummary struct {
+	FormatVersion         string `json:"format_version,omitempty"`
+	TerraformVersion      string `json:"terraform_version,omitempty"`
+	ResourceChangesCount  int    `json:"resource_changes_count"`
+	RedactedByMaskCount   int    `json:"redacted_by_mask_count"`
+	RedactedByKeyCount    int    `json:"redacted_by_key_count"`
+	RedactedByValueCount  int    `json:"redacted_by_value_count"`
+	TotalRedactedLeaves   int    `json:"total_redacted_leaves"`
+	SkippedTopLevelFields int    `json:"skipped_top_level_fields"`
+}
+
+// PlanScrubber defines the contract for streaming sanitization of Terraform/OpenTofu JSON plans.
+type PlanScrubber interface {
+	ScrubStream(ctx context.Context, r io.Reader, w io.Writer) (*ScrubSummary, error)
+	ScrubFile(ctx context.Context, inPath, outPath string) (*ScrubSummary, error)
 }
