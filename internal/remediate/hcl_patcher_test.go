@@ -539,10 +539,10 @@ func TestGeneratePatches_ViolationsWithoutRemediationOrUnmatchedResource(t *test
 	})
 }
 
-// TestGeneratePatches_ModulePrefixedResourceAddress verifies fallback extraction of resource type and name from module-prefixed addresses.
+// TestGeneratePatches_ModulePrefixedResourceAddress verifies fallback extraction of resource type and name from module-prefixed addresses
+// against a local ./modules/storage/main.tf directory, and verifies that missing module directories are not resolved via root fallback.
 func TestGeneratePatches_ModulePrefixedResourceAddress(t *testing.T) {
 	ctx := context.Background()
-	tfDir := filepath.Join("..", "..", "testdata", "repos", "payments-aws")
 	patcher := NewPatcher()
 
 	v := model.PolicyViolation{
@@ -562,16 +562,51 @@ func TestGeneratePatches_ModulePrefixedResourceAddress(t *testing.T) {
 		},
 	}
 
-	patches, err := patcher.GeneratePatches(ctx, tfDir, []model.PolicyViolation{v})
-	if err != nil {
-		t.Fatalf("GeneratePatches failed: %v", err)
-	}
-	if len(patches) != 1 {
-		t.Fatalf("expected 1 patch from module-prefixed address fallback, got %d", len(patches))
-	}
-	if patches[0].ResourceAddress != "module.storage.aws_s3_bucket.unencrypted_reports" {
-		t.Errorf("expected ResourceAddress to be preserved, got %q", patches[0].ResourceAddress)
-	}
+	t.Run("LocalModuleDirectory_PatchesCleanly", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		modDir := filepath.Join(tmpDir, "modules", "storage")
+		if err := os.MkdirAll(modDir, 0o755); err != nil {
+			t.Fatalf("failed to create module dir: %v", err)
+		}
+		modTF := `resource "aws_s3_bucket" "unencrypted_reports" {
+  bucket = "company-unencrypted-reports"
+}
+`
+		if err := os.WriteFile(filepath.Join(modDir, "main.tf"), []byte(modTF), 0o600); err != nil {
+			t.Fatalf("failed to write module main.tf: %v", err)
+		}
+
+		patches, err := patcher.GeneratePatches(ctx, tmpDir, []model.PolicyViolation{v})
+		if err != nil {
+			t.Fatalf("GeneratePatches failed: %v", err)
+		}
+		if len(patches) != 1 {
+			t.Fatalf("expected 1 patch from module-prefixed address fallback, got %d", len(patches))
+		}
+		if patches[0].ResourceAddress != "module.storage.aws_s3_bucket.unencrypted_reports" {
+			t.Errorf("expected ResourceAddress to be preserved, got %q", patches[0].ResourceAddress)
+		}
+		if filepath.ToSlash(patches[0].FilePath) != "modules/storage/main.tf" {
+			t.Errorf("expected FilePath == \"modules/storage/main.tf\", got %q", patches[0].FilePath)
+		}
+	})
+
+	t.Run("MissingModuleInPaymentsAWS_NoRootFallback", func(t *testing.T) {
+		tfDir := filepath.Join("..", "..", "testdata", "repos", "payments-aws")
+		rep, err := patcher.GenerateRemediationReport(ctx, tfDir, []model.PolicyViolation{v})
+		if err != nil {
+			t.Fatalf("GenerateRemediationReport failed: %v", err)
+		}
+		if len(rep.Patches) != 0 {
+			t.Fatalf("expected 0 patches without root fallback, got %d", len(rep.Patches))
+		}
+		if len(rep.Skipped) != 1 {
+			t.Fatalf("expected 1 skipped diagnostic, got %d", len(rep.Skipped))
+		}
+		if rep.Skipped[0].Reason != model.SkipReasonUnresolvedLocalModule {
+			t.Errorf("expected reason %q, got %q", model.SkipReasonUnresolvedLocalModule, rep.Skipped[0].Reason)
+		}
+	})
 }
 
 // TestGeneratePatches_CRLFNormalization verifies that Windows CRLF line endings are normalized to LF across OriginalHCL, PatchedHCL, and UnifiedDiff.
@@ -1536,5 +1571,535 @@ func TestResolveResourceTypeAndName_MalformedAddresses(t *testing.T) {
 					tc.violation, gotType, gotName, tc.wantType, tc.wantName)
 			}
 		})
+	}
+}
+
+// TestGenerateRemediationReport_MixedPatchedAndSkipped verifies total violation accounting across patched and skipped violations.
+func TestGenerateRemediationReport_MixedPatchedAndSkipped(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	mainTF := `variable "enable_pab" {
+  type    = bool
+  default = false
+}
+
+module "ext_bucket" {
+  source = "terraform-aws-modules/s3-bucket/aws"
+  bucket = "ext-bucket"
+}
+
+resource "aws_s3_bucket_public_access_block" "local_bad" {
+  bucket            = "local-bucket"
+  block_public_acls = false
+}
+
+resource "aws_s3_bucket_public_access_block" "var_driven" {
+  bucket            = "var-bucket"
+  block_public_acls = var.enable_pab
+}
+
+resource "google_sql_database_instance" "advisory" {
+  name = "advisory-db"
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(mainTF), 0o600); err != nil {
+		t.Fatalf("failed to write main.tf: %v", err)
+	}
+
+	patcher := NewPatcher()
+
+	t.Run("EmptyViolations_NonNilSlicesAndMap", func(t *testing.T) {
+		rep, err := patcher.GenerateRemediationReport(ctx, tmpDir, []model.PolicyViolation{})
+		if err != nil {
+			t.Fatalf("GenerateRemediationReport failed: %v", err)
+		}
+		if rep.Patches == nil || rep.Skipped == nil || rep.Summary.ByReason == nil {
+			t.Errorf("expected non-nil Patches, Skipped, and Summary.ByReason, got %+v", rep)
+		}
+		if rep.Summary.TotalViolations != 0 || rep.Summary.PatchedCount != 0 || rep.Summary.SkippedCount != 0 {
+			t.Errorf("expected zero summary counts, got %+v", rep.Summary)
+		}
+	})
+
+	t.Run("MixedViolations_TotalAccountingAndMetadata", func(t *testing.T) {
+		violations := []model.PolicyViolation{
+			{
+				RuleID:          "aws-s3-pab-acls",
+				Severity:        "HIGH",
+				ResourceAddress: "aws_s3_bucket_public_access_block.local_bad",
+				ResourceType:    "aws_s3_bucket_public_access_block",
+				ResourceName:    "local_bad",
+				Remediation: &model.RemediationSpec{
+					AttributePath: []string{"block_public_acls"},
+					SuggestedVal:  true,
+				},
+			},
+			{
+				RuleID:          "gcp-sql-ssl",
+				Severity:        "HIGH",
+				ResourceAddress: "google_sql_database_instance.advisory",
+				ResourceType:    "google_sql_database_instance",
+				ResourceName:    "advisory",
+				Remediation:     nil,
+			},
+			{
+				RuleID:          "aws-s3-pab-acls",
+				Severity:        "HIGH",
+				ResourceAddress: "module.ext_bucket.aws_s3_bucket_public_access_block.this",
+				ResourceType:    "aws_s3_bucket_public_access_block",
+				ResourceName:    "this",
+				Remediation: &model.RemediationSpec{
+					AttributePath: []string{"block_public_acls"},
+					SuggestedVal:  true,
+				},
+			},
+			{
+				RuleID:          "aws-s3-pab-acls",
+				Severity:        "HIGH",
+				ResourceAddress: "aws_s3_bucket_public_access_block.var_driven",
+				ResourceType:    "aws_s3_bucket_public_access_block",
+				ResourceName:    "var_driven",
+				Remediation: &model.RemediationSpec{
+					AttributePath: []string{"block_public_acls"},
+					SuggestedVal:  true,
+				},
+			},
+		}
+
+		rep, err := patcher.GenerateRemediationReport(ctx, tmpDir, violations)
+		if err != nil {
+			t.Fatalf("GenerateRemediationReport failed: %v", err)
+		}
+		if rep.Summary.TotalViolations != 4 {
+			t.Errorf("TotalViolations = %d, want 4", rep.Summary.TotalViolations)
+		}
+		if rep.Summary.PatchedCount != 1 || len(rep.Patches) != 1 {
+			t.Fatalf("PatchedCount = %d (len %d), want 1", rep.Summary.PatchedCount, len(rep.Patches))
+		}
+		if rep.Summary.SkippedCount != 3 || len(rep.Skipped) != 3 {
+			t.Fatalf("SkippedCount = %d (len %d), want 3", rep.Summary.SkippedCount, len(rep.Skipped))
+		}
+		if rep.Summary.TotalViolations != rep.Summary.PatchedCount+rep.Summary.SkippedCount {
+			t.Errorf("summary invariant failed: %+v", rep.Summary)
+		}
+
+		if rep.Patches[0].RuleID != "aws-s3-pab-acls" {
+			t.Errorf("expected patch RuleID aws-s3-pab-acls, got %q", rep.Patches[0].RuleID)
+		}
+		if !strings.Contains(rep.Patches[0].UnifiedDiff, "+  block_public_acls = true") {
+			t.Errorf("unexpected unified diff:\n%s", rep.Patches[0].UnifiedDiff)
+		}
+
+		byAddr := map[string]model.RemediationDiagnostic{}
+		for _, d := range rep.Skipped {
+			byAddr[d.ResourceAddress] = d
+			if d.Detail == "" || d.Guidance == "" {
+				t.Errorf("expected non-empty Detail and Guidance for %+v", d)
+			}
+		}
+
+		if d, ok := byAddr["google_sql_database_instance.advisory"]; !ok || d.Reason != model.SkipReasonMissingRemediationMetadata {
+			t.Errorf("expected missing_remediation_metadata for advisory, got %+v", d)
+		}
+		if d, ok := byAddr["module.ext_bucket.aws_s3_bucket_public_access_block.this"]; !ok ||
+			d.Reason != model.SkipReasonExternalModuleSource ||
+			d.ModuleSource != "terraform-aws-modules/s3-bucket/aws" ||
+			d.FilePath != "main.tf" {
+			t.Errorf("unexpected external_module_source diagnostic: %+v", d)
+		}
+		if d, ok := byAddr["aws_s3_bucket_public_access_block.var_driven"]; !ok ||
+			d.Reason != model.SkipReasonUnsupportedExpression ||
+			d.FilePath != "main.tf" {
+			t.Errorf("unexpected unsupported_expression diagnostic: %+v", d)
+		}
+	})
+}
+
+// TestGenerateRemediationReport_ExternalModuleDoesNotClobberSameNamedRootResource verifies external modules never fall back to root resources.
+func TestGenerateRemediationReport_ExternalModuleDoesNotClobberSameNamedRootResource(t *testing.T) {
+	ctx := context.Background()
+
+	sources := []string{
+		"terraform-aws-modules/s3-bucket/aws",
+		"git::https://example.com/org/tf-s3.git?ref=v1.0.0",
+		"github.com/org/tf-s3",
+		"s3::https://s3-eu-west-1.amazonaws.com/mybucket/mod.zip",
+		"registry.opentofu.org/hashicorp/consul/aws",
+	}
+
+	for _, modSrc := range sources {
+		t.Run(modSrc, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			mainTF := `module "s3" {
+  source = "` + modSrc + `"
+}
+
+resource "aws_s3_bucket" "this" {
+  bucket = "root-same-named-bucket"
+}
+`
+			mainPath := filepath.Join(tmpDir, "main.tf")
+			if err := os.WriteFile(mainPath, []byte(mainTF), 0o600); err != nil {
+				t.Fatalf("failed to write main.tf: %v", err)
+			}
+
+			v := model.PolicyViolation{
+				RuleID:          "AWS-S3-ENCRYPT-001",
+				Severity:        "HIGH",
+				ResourceAddress: "module.s3.aws_s3_bucket.this",
+				ResourceType:    "aws_s3_bucket",
+				ResourceName:    "this",
+				Remediation: &model.RemediationSpec{
+					AttributePath: []string{"server_side_encryption_configuration", "rule", "apply_server_side_encryption_by_default", "sse_algorithm"},
+					SuggestedVal:  "aws:kms",
+				},
+			}
+
+			rep, err := NewPatcher(WithWriteChanges(true)).GenerateRemediationReport(ctx, tmpDir, []model.PolicyViolation{v})
+			if err != nil {
+				t.Fatalf("GenerateRemediationReport failed: %v", err)
+			}
+			if len(rep.Patches) != 0 {
+				t.Fatalf("expected 0 patches, got %d", len(rep.Patches))
+			}
+			if len(rep.Skipped) != 1 {
+				t.Fatalf("expected 1 skipped diagnostic, got %d", len(rep.Skipped))
+			}
+			d := rep.Skipped[0]
+			if d.Reason != model.SkipReasonExternalModuleSource {
+				t.Errorf("Reason = %q, want %q", d.Reason, model.SkipReasonExternalModuleSource)
+			}
+			if d.ModuleSource != modSrc {
+				t.Errorf("ModuleSource = %q, want %q", d.ModuleSource, modSrc)
+			}
+			if d.FilePath != "main.tf" {
+				t.Errorf("FilePath = %q, want main.tf", d.FilePath)
+			}
+
+			afterBytes, err := os.ReadFile(mainPath)
+			if err != nil {
+				t.Fatalf("failed to read main.tf: %v", err)
+			}
+			if string(afterBytes) != mainTF {
+				t.Errorf("root main.tf was mutated! got:\n%s", string(afterBytes))
+			}
+		})
+	}
+}
+
+// TestGenerateRemediationReport_UnsupportedExpressionsMatrix tests pre-flight AST expression and block safety.
+func TestGenerateRemediationReport_UnsupportedExpressionsMatrix(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	mainTF := `variable "enabled" { default = false }
+variable "prod" { default = false }
+variable "a" { default = "" }
+variable "algo" { default = "AES256" }
+variable "rules" { default = [] }
+locals { tls = "TLS1_0" }
+
+resource "aws_ebs_volume" "var_ref" {
+  encrypted = var.enabled
+}
+
+resource "azurerm_storage_account" "local_ref" {
+  min_tls_version = local.tls
+}
+
+resource "aws_ebs_volume" "cond_expr" {
+  encrypted = var.prod ? true : false
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "func_expr" {
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = coalesce(var.a, "AES256")
+    }
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "interp_expr" {
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "${var.algo}"
+    }
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "dynamic_blk" {
+  dynamic "rule" {
+    for_each = var.rules
+    content {
+      apply_server_side_encryption_by_default {
+        sse_algorithm = "AES256"
+      }
+    }
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "attr_as_blk" {
+  rule = var.rules
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "multi_blk" {
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "google_kms_crypto_key" "static_empty_str" {
+  rotation_period = ""
+}
+
+resource "aws_ebs_volume" "static_false" {
+  encrypted = false
+}
+
+resource "azurerm_key_vault" "static_num" {
+  soft_delete_retention_days = 7
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "partial_nested" {
+  bucket = "partial"
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(mainTF), 0o600); err != nil {
+		t.Fatalf("failed to write main.tf: %v", err)
+	}
+
+	ssePath := []string{"rule", "apply_server_side_encryption_by_default", "sse_algorithm"}
+	violations := []model.PolicyViolation{
+		{RuleID: "r1", Severity: "HIGH", ResourceAddress: "aws_ebs_volume.var_ref", Remediation: &model.RemediationSpec{AttributePath: []string{"encrypted"}, SuggestedVal: true}},
+		{RuleID: "r2", Severity: "HIGH", ResourceAddress: "azurerm_storage_account.local_ref", Remediation: &model.RemediationSpec{AttributePath: []string{"min_tls_version"}, SuggestedVal: "TLS1_2"}},
+		{RuleID: "r3", Severity: "HIGH", ResourceAddress: "aws_ebs_volume.cond_expr", Remediation: &model.RemediationSpec{AttributePath: []string{"encrypted"}, SuggestedVal: true}},
+		{RuleID: "r4", Severity: "HIGH", ResourceAddress: "aws_s3_bucket_server_side_encryption_configuration.func_expr", Remediation: &model.RemediationSpec{AttributePath: ssePath, SuggestedVal: "aws:kms"}},
+		{RuleID: "r5", Severity: "HIGH", ResourceAddress: "aws_s3_bucket_server_side_encryption_configuration.interp_expr", Remediation: &model.RemediationSpec{AttributePath: ssePath, SuggestedVal: "aws:kms"}},
+		{RuleID: "r6", Severity: "HIGH", ResourceAddress: "aws_s3_bucket_server_side_encryption_configuration.dynamic_blk", Remediation: &model.RemediationSpec{AttributePath: ssePath, SuggestedVal: "aws:kms"}},
+		{RuleID: "r7", Severity: "HIGH", ResourceAddress: "aws_s3_bucket_server_side_encryption_configuration.attr_as_blk", Remediation: &model.RemediationSpec{AttributePath: ssePath, SuggestedVal: "aws:kms"}},
+		{RuleID: "r8", Severity: "HIGH", ResourceAddress: "aws_s3_bucket_server_side_encryption_configuration.multi_blk", Remediation: &model.RemediationSpec{AttributePath: ssePath, SuggestedVal: "aws:kms"}},
+		// Patchable static literals & missing blocks:
+		{RuleID: "p1", Severity: "MEDIUM", ResourceAddress: "google_kms_crypto_key.static_empty_str", Remediation: &model.RemediationSpec{AttributePath: []string{"rotation_period"}, SuggestedVal: "7776000s"}},
+		{RuleID: "p2", Severity: "HIGH", ResourceAddress: "aws_ebs_volume.static_false", Remediation: &model.RemediationSpec{AttributePath: []string{"encrypted"}, SuggestedVal: true}},
+		{RuleID: "p3", Severity: "MEDIUM", ResourceAddress: "azurerm_key_vault.static_num", Remediation: &model.RemediationSpec{AttributePath: []string{"soft_delete_retention_days"}, SuggestedVal: 90}},
+		{RuleID: "p4", Severity: "HIGH", ResourceAddress: "aws_s3_bucket_server_side_encryption_configuration.partial_nested", Remediation: &model.RemediationSpec{AttributePath: ssePath, SuggestedVal: "aws:kms"}},
+	}
+
+	rep, err := NewPatcher().GenerateRemediationReport(ctx, tmpDir, violations)
+	if err != nil {
+		t.Fatalf("GenerateRemediationReport failed: %v", err)
+	}
+	if rep.Summary.SkippedCount != 8 {
+		t.Errorf("SkippedCount = %d, want 8; skipped=%+v", rep.Summary.SkippedCount, rep.Skipped)
+	}
+	if rep.Summary.PatchedCount != 4 {
+		t.Errorf("PatchedCount = %d, want 4; patches=%+v", rep.Summary.PatchedCount, rep.Patches)
+	}
+	for _, d := range rep.Skipped {
+		if d.Reason != model.SkipReasonUnsupportedExpression {
+			t.Errorf("expected unsupported_expression for %s, got %q", d.ResourceAddress, d.Reason)
+		}
+	}
+	// Verify that dynamic_blk did not have any orphan blocks injected into its PatchedHCL (if any patch was generated from the same file)
+	for _, p := range rep.Patches {
+		if strings.Contains(p.PatchedHCL, `dynamic "rule"`) && strings.Contains(p.PatchedHCL, `apply_server_side_encryption_by_default`) {
+			// Verify dynamic_blk block itself remains untouched
+			if strings.Contains(p.UnifiedDiff, "+  rule {") && strings.Contains(p.UnifiedDiff, "dynamic_blk") {
+				t.Errorf("skipped dynamic_blk should not have orphan blocks created in diff:\n%s", p.UnifiedDiff)
+			}
+		}
+	}
+}
+
+// TestGenerateRemediationReport_PathTraversalAndSymlinkModuleSource tests module source traversal, interpolation, missing source, and unresolved local modules.
+func TestGenerateRemediationReport_PathTraversalAndSymlinkModuleSource(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	mainTF := `variable "mod_src" { default = "./modules/ok" }
+
+module "outside" {
+  source = "../outside"
+}
+
+module "abs" {
+  source = "/abs/path"
+}
+
+module "interp" {
+  source = "${var.mod_src}"
+}
+
+module "nosrc" {
+}
+
+module "missing_local" {
+  source = "./modules/missing"
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(mainTF), 0o600); err != nil {
+		t.Fatalf("failed to write main.tf: %v", err)
+	}
+
+	spec := &model.RemediationSpec{AttributePath: []string{"encrypted"}, SuggestedVal: true}
+	violations := []model.PolicyViolation{
+		{RuleID: "r1", Severity: "HIGH", ResourceAddress: "module.outside.aws_ebs_volume.v", Remediation: spec},
+		{RuleID: "r2", Severity: "HIGH", ResourceAddress: "module.abs.aws_ebs_volume.v", Remediation: spec},
+		{RuleID: "r3", Severity: "HIGH", ResourceAddress: "module.interp.aws_ebs_volume.v", Remediation: spec},
+		{RuleID: "r4", Severity: "HIGH", ResourceAddress: "module.nosrc.aws_ebs_volume.v", Remediation: spec},
+		{RuleID: "r5", Severity: "HIGH", ResourceAddress: "module.missing_local.aws_ebs_volume.v", Remediation: spec},
+	}
+
+	rep, err := NewPatcher().GenerateRemediationReport(ctx, tmpDir, violations)
+	if err != nil {
+		t.Fatalf("GenerateRemediationReport failed: %v", err)
+	}
+	if len(rep.Patches) != 0 {
+		t.Fatalf("expected 0 patches, got %d", len(rep.Patches))
+	}
+	if len(rep.Skipped) != 5 {
+		t.Fatalf("expected 5 skipped diagnostics, got %d", len(rep.Skipped))
+	}
+
+	wantReasons := map[string]model.RemediationSkipReason{
+		"module.outside.aws_ebs_volume.v":       model.SkipReasonPathTraversalBlocked,
+		"module.abs.aws_ebs_volume.v":           model.SkipReasonPathTraversalBlocked,
+		"module.interp.aws_ebs_volume.v":        model.SkipReasonUnsupportedExpression,
+		"module.nosrc.aws_ebs_volume.v":         model.SkipReasonUnresolvedLocalModule,
+		"module.missing_local.aws_ebs_volume.v": model.SkipReasonUnresolvedLocalModule,
+	}
+	for _, d := range rep.Skipped {
+		want, ok := wantReasons[d.ResourceAddress]
+		if !ok {
+			t.Errorf("unexpected skipped address %q", d.ResourceAddress)
+			continue
+		}
+		if d.Reason != want {
+			t.Errorf("address %s: Reason = %q, want %q", d.ResourceAddress, d.Reason, want)
+		}
+	}
+
+	t.Run("SymlinkedModuleDir_Blocked", func(t *testing.T) {
+		symRoot := t.TempDir()
+		outsideDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outsideDir, "main.tf"), []byte(`resource "aws_ebs_volume" "v" { encrypted = false }`), 0o600); err != nil {
+			t.Fatalf("write outside main.tf: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(symRoot, "modules"), 0o755); err != nil {
+			t.Fatalf("mkdir modules: %v", err)
+		}
+		symPath := filepath.Join(symRoot, "modules", "sym_mod")
+		if err := os.Symlink(outsideDir, symPath); err != nil {
+			t.Skipf("skipping symlink module test (os.Symlink unsupported or unprivileged): %v", err)
+		}
+
+		symMainTF := `module "sym" {
+  source = "./modules/sym_mod"
+}
+`
+		if err := os.WriteFile(filepath.Join(symRoot, "main.tf"), []byte(symMainTF), 0o600); err != nil {
+			t.Fatalf("write symRoot main.tf: %v", err)
+		}
+
+		symViolation := model.PolicyViolation{
+			RuleID:          "r-sym",
+			Severity:        "HIGH",
+			ResourceAddress: "module.sym.aws_ebs_volume.v",
+			Remediation:     spec,
+		}
+		symRep, err := NewPatcher().GenerateRemediationReport(ctx, symRoot, []model.PolicyViolation{symViolation})
+		if err != nil {
+			t.Fatalf("GenerateRemediationReport failed: %v", err)
+		}
+		if len(symRep.Patches) != 0 {
+			t.Fatalf("expected 0 patches for symlinked module, got %d", len(symRep.Patches))
+		}
+		if len(symRep.Skipped) != 1 || symRep.Skipped[0].Reason != model.SkipReasonPathTraversalBlocked {
+			t.Fatalf("expected 1 path_traversal_blocked diagnostic, got %+v", symRep.Skipped)
+		}
+	})
+}
+
+// TestGenerateRemediationReport_DataSourceAndInvalidAddresses verifies data. addresses and malformed/empty addresses.
+func TestGenerateRemediationReport_DataSourceAndInvalidAddresses(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	mainTF := `resource "aws_s3_bucket" "logs" {
+  bucket = "managed-logs"
+}
+`
+	mainPath := filepath.Join(tmpDir, "main.tf")
+	if err := os.WriteFile(mainPath, []byte(mainTF), 0o600); err != nil {
+		t.Fatalf("failed to write main.tf: %v", err)
+	}
+
+	spec := &model.RemediationSpec{AttributePath: []string{"acl"}, SuggestedVal: "private"}
+	violations := []model.PolicyViolation{
+		{RuleID: "r-data", Severity: "MEDIUM", ResourceAddress: "data.aws_s3_bucket.logs", Remediation: spec},
+		{RuleID: "r-bare-mod", Severity: "MEDIUM", ResourceAddress: "module.only", Remediation: spec},
+		{RuleID: "r-empty", Severity: "MEDIUM", ResourceAddress: "", Remediation: spec},
+	}
+
+	rep, err := NewPatcher(WithWriteChanges(true)).GenerateRemediationReport(ctx, tmpDir, violations)
+	if err != nil {
+		t.Fatalf("GenerateRemediationReport failed: %v", err)
+	}
+	if len(rep.Patches) != 0 {
+		t.Fatalf("expected 0 patches, got %d", len(rep.Patches))
+	}
+	if len(rep.Skipped) != 3 {
+		t.Fatalf("expected 3 skipped diagnostics, got %d", len(rep.Skipped))
+	}
+	if rep.Skipped[0].Reason != model.SkipReasonResourceBlockNotFound {
+		t.Errorf("data. address reason = %q, want %q", rep.Skipped[0].Reason, model.SkipReasonResourceBlockNotFound)
+	}
+	if rep.Skipped[1].Reason != model.SkipReasonInvalidResourceAddress {
+		t.Errorf("module.only reason = %q, want %q", rep.Skipped[1].Reason, model.SkipReasonInvalidResourceAddress)
+	}
+	if rep.Skipped[2].Reason != model.SkipReasonInvalidResourceAddress {
+		t.Errorf("empty address reason = %q, want %q", rep.Skipped[2].Reason, model.SkipReasonInvalidResourceAddress)
+	}
+
+	afterBytes, err := os.ReadFile(mainPath)
+	if err != nil {
+		t.Fatalf("failed to read main.tf: %v", err)
+	}
+	if string(afterBytes) != mainTF {
+		t.Errorf("resource aws_s3_bucket.logs was mutated on disk:\n%s", string(afterBytes))
+	}
+}
+
+// TestGenerateRemediationReport_OversizedTFFileRejected verifies the 4 MiB .tf file size cap.
+func TestGenerateRemediationReport_OversizedTFFileRejected(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	oversized := strings.Repeat("#", (4*1024*1024)+1)
+	if err := os.WriteFile(filepath.Join(tmpDir, "huge.tf"), []byte(oversized), 0o600); err != nil {
+		t.Fatalf("failed to write huge.tf: %v", err)
+	}
+
+	v := model.PolicyViolation{
+		RuleID:          "r1",
+		Severity:        "HIGH",
+		ResourceAddress: "aws_ebs_volume.v",
+		Remediation:     &model.RemediationSpec{AttributePath: []string{"encrypted"}, SuggestedVal: true},
+	}
+
+	_, err := NewPatcher().GenerateRemediationReport(ctx, tmpDir, []model.PolicyViolation{v})
+	if err == nil {
+		t.Fatal("expected error for oversized .tf file, got nil")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "exceeds maximum size") {
+		t.Errorf("expected error to mention 'exceeds maximum size', got: %v", err)
 	}
 }

@@ -107,26 +107,27 @@ type PatchView struct {
 
 // WorkspaceResponse encapsulates the full control plane state returned by GET /api/workspace.
 type WorkspaceResponse struct {
-	State             string                    `json:"state"`
-	EmptyWorkspace    bool                      `json:"empty_workspace"`
-	CustomUploaded    bool                      `json:"custom_uploaded"`
-	ActivePolicy      string                    `json:"active_policy"`
-	ActivePolicyName  string                    `json:"active_policy_name"`
-	AvailablePolicies []string                  `json:"available_policies"`
-	CorpusDir         string                    `json:"corpus_dir"`
-	SchemaPath        string                    `json:"schema_path"`
-	ReposDir          string                    `json:"repos_dir"`
-	Workers           int                       `json:"workers"`
-	EvalDurationMs    float64                   `json:"eval_duration_ms"`
-	Verification      *model.VerificationResult `json:"verification"`
-	PolicyLines       []PolicyLine              `json:"policy_lines"`
-	RawPolicySource   string                    `json:"raw_policy_source"`
-	PolicySource      string                    `json:"policy_source"`
-	Schemas           model.ProviderSchemaMap   `json:"schemas"`
-	Backtest          *model.BlastRadiusReport  `json:"backtest"`
-	SnapshotRows      []SnapshotRow             `json:"snapshot_rows"`
-	Patches           []PatchView               `json:"patches"`
-	AllowWrite        bool                      `json:"allow_write"`
+	State             string                        `json:"state"`
+	EmptyWorkspace    bool                          `json:"empty_workspace"`
+	CustomUploaded    bool                          `json:"custom_uploaded"`
+	ActivePolicy      string                        `json:"active_policy"`
+	ActivePolicyName  string                        `json:"active_policy_name"`
+	AvailablePolicies []string                      `json:"available_policies"`
+	CorpusDir         string                        `json:"corpus_dir"`
+	SchemaPath        string                        `json:"schema_path"`
+	ReposDir          string                        `json:"repos_dir"`
+	Workers           int                           `json:"workers"`
+	EvalDurationMs    float64                       `json:"eval_duration_ms"`
+	Verification      *model.VerificationResult     `json:"verification"`
+	PolicyLines       []PolicyLine                  `json:"policy_lines"`
+	RawPolicySource   string                        `json:"raw_policy_source"`
+	PolicySource      string                        `json:"policy_source"`
+	Schemas           model.ProviderSchemaMap       `json:"schemas"`
+	Backtest          *model.BlastRadiusReport      `json:"backtest"`
+	SnapshotRows      []SnapshotRow                 `json:"snapshot_rows"`
+	Patches           []PatchView                   `json:"patches"`
+	Skipped           []model.RemediationDiagnostic `json:"skipped"`
+	AllowWrite        bool                          `json:"allow_write"`
 }
 
 // UploadedFile represents a single file uploaded from the browser UI.
@@ -225,13 +226,14 @@ type RemediateRequest struct {
 
 // RemediateResponse defines the JSON response payload for POST /api/remediate.
 type RemediateResponse struct {
-	State         string                   `json:"state"`
-	Patches       []PatchView              `json:"patches"`
-	RawPatches    []model.RemediationPatch `json:"raw_patches"`
-	Applied       bool                     `json:"applied"`
-	WrittenToDisk bool                     `json:"written_to_disk"`
-	Backtest      *model.BlastRadiusReport `json:"backtest,omitempty"`
-	SnapshotRows  []SnapshotRow            `json:"snapshot_rows,omitempty"`
+	State         string                        `json:"state"`
+	Patches       []PatchView                   `json:"patches"`
+	RawPatches    []model.RemediationPatch      `json:"raw_patches"`
+	Skipped       []model.RemediationDiagnostic `json:"skipped"`
+	Applied       bool                          `json:"applied"`
+	WrittenToDisk bool                          `json:"written_to_disk"`
+	Backtest      *model.BlastRadiusReport      `json:"backtest,omitempty"`
+	SnapshotRows  []SnapshotRow                 `json:"snapshot_rows,omitempty"`
 }
 
 // ApplyRequest defines the JSON request payload for POST /api/apply.
@@ -247,20 +249,21 @@ type ApplyRequest struct {
 
 // ApplyResponse defines the JSON response payload for POST /api/apply.
 type ApplyResponse struct {
-	State              string                    `json:"state"`
-	Applied            bool                      `json:"applied"`
-	WrittenToDisk      bool                      `json:"written_to_disk"`
-	AppliedCount       int                       `json:"applied_count"`
-	EvalMs             float64                   `json:"eval_ms"`
-	Workers            int                       `json:"workers"`
-	Patches            []PatchView               `json:"patches"`
-	Backtest           *model.BlastRadiusReport  `json:"backtest"`
-	SnapshotRows       []SnapshotRow             `json:"snapshot_rows"`
-	Verification       *model.VerificationResult `json:"verification"`
-	TotalReposAnalyzed int                       `json:"total_repos_analyzed"`
-	BlockedPlansCount  int                       `json:"blocked_plans_count"`
-	TotalResources     int                       `json:"total_resources"`
-	TotalViolations    int                       `json:"total_violations"`
+	State              string                        `json:"state"`
+	Applied            bool                          `json:"applied"`
+	WrittenToDisk      bool                          `json:"written_to_disk"`
+	AppliedCount       int                           `json:"applied_count"`
+	EvalMs             float64                       `json:"eval_ms"`
+	Workers            int                           `json:"workers"`
+	Patches            []PatchView                   `json:"patches"`
+	Skipped            []model.RemediationDiagnostic `json:"skipped"`
+	Backtest           *model.BlastRadiusReport      `json:"backtest"`
+	SnapshotRows       []SnapshotRow                 `json:"snapshot_rows"`
+	Verification       *model.VerificationResult     `json:"verification"`
+	TotalReposAnalyzed int                           `json:"total_repos_analyzed"`
+	BlockedPlansCount  int                           `json:"blocked_plans_count"`
+	TotalResources     int                           `json:"total_resources"`
+	TotalViolations    int                           `json:"total_violations"`
 }
 
 // Server implements the local-first HTTP control plane and satisfies http.Handler.
@@ -1295,7 +1298,7 @@ func (s *Server) handlePostRemediate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	patchViews, rawPatches, allViolations, err := s.generateCorpusPatches(ctx, reposAbs, backtestRep)
+	patchViews, rawPatches, skipped, allViolations, err := s.generateCorpusPatches(ctx, reposAbs, backtestRep)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -1317,6 +1320,18 @@ func (s *Server) handlePostRemediate(w http.ResponseWriter, r *http.Request) {
 		}
 		patchViews = filteredViews
 		rawPatches = filteredRaw
+	}
+	if filterAddr != "" {
+		filteredSkipped := make([]model.RemediationDiagnostic, 0)
+		for _, d := range skipped {
+			if d.ResourceAddress == filterAddr {
+				filteredSkipped = append(filteredSkipped, d)
+			}
+		}
+		skipped = filteredSkipped
+	}
+	if skipped == nil {
+		skipped = []model.RemediationDiagnostic{}
 	}
 
 	if req.Write && !s.cfg.AllowWrite {
@@ -1351,6 +1366,7 @@ func (s *Server) handlePostRemediate(w http.ResponseWriter, r *http.Request) {
 		State:         wsResp.State,
 		Patches:       patchViews,
 		RawPatches:    rawPatches,
+		Skipped:       skipped,
 		Applied:       applied,
 		WrittenToDisk: writtenToDisk,
 		Backtest:      wsResp.Backtest,
@@ -1395,6 +1411,7 @@ func (s *Server) handlePostApply(w http.ResponseWriter, r *http.Request) {
 			WrittenToDisk:      false,
 			AppliedCount:       0,
 			Patches:            wsResp.Patches,
+			Skipped:            nonNilDiagnostics(wsResp.Skipped),
 			Backtest:           wsResp.Backtest,
 			SnapshotRows:       wsResp.SnapshotRows,
 			Verification:       wsResp.Verification,
@@ -1465,7 +1482,7 @@ func (s *Server) handlePostApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	patchViews, rawPatches, allViolations, err := s.generateCorpusPatches(ctx, reposAbs, rawBacktest)
+	patchViews, rawPatches, _, allViolations, err := s.generateCorpusPatches(ctx, reposAbs, rawBacktest)
 	if err != nil {
 		s.writeError(w, err)
 		return
@@ -1537,6 +1554,7 @@ func (s *Server) handlePostApply(w http.ResponseWriter, r *http.Request) {
 		EvalMs:             wsResp.EvalDurationMs,
 		Workers:            wsResp.Workers,
 		Patches:            wsResp.Patches,
+		Skipped:            nonNilDiagnostics(wsResp.Skipped),
 		Backtest:           wsResp.Backtest,
 		SnapshotRows:       wsResp.SnapshotRows,
 		Verification:       wsResp.Verification,
@@ -1631,6 +1649,7 @@ func (s *Server) buildEmptyWorkspaceResponse(elapsedMs float64) *WorkspaceRespon
 		},
 		SnapshotRows: []SnapshotRow{},
 		Patches:      []PatchView{},
+		Skipped:      []model.RemediationDiagnostic{},
 		AllowWrite:   s.cfg.AllowWrite,
 	}
 }
@@ -1737,7 +1756,7 @@ func (s *Server) buildWorkspaceState(ctx context.Context, policyRelOverride, cor
 		rawBacktest.PolicyPath = policyRelSlash
 	}
 
-	patchViews, _, allViolations, err := s.generateCorpusPatches(ctx, reposAbs, rawBacktest)
+	patchViews, _, skipped, allViolations, err := s.generateCorpusPatches(ctx, reposAbs, rawBacktest)
 	if err != nil {
 		return nil, err
 	}
@@ -1814,6 +1833,7 @@ func (s *Server) buildWorkspaceState(ctx context.Context, policyRelOverride, cor
 		Backtest:          activeBacktest,
 		SnapshotRows:      snapshotRows,
 		Patches:           patchViews,
+		Skipped:           nonNilDiagnostics(skipped),
 		AllowWrite:        s.cfg.AllowWrite,
 	}, nil
 }
@@ -1892,7 +1912,7 @@ func (s *Server) evaluateLivePolicyWorkspace(ctx context.Context, policyRel, pol
 		}
 	}
 
-	patchViews, _, _, _ := s.generateCorpusPatches(ctx, reposAbs, backtestRep)
+	patchViews, _, skipped, _, _ := s.generateCorpusPatches(ctx, reposAbs, backtestRep)
 	snapshotRows := s.buildSnapshotRows(snapshots, backtestRep, patchViews)
 
 	state := StateViolationsDetected
@@ -1927,6 +1947,7 @@ func (s *Server) evaluateLivePolicyWorkspace(ctx context.Context, policyRel, pol
 		Backtest:          backtestRep,
 		SnapshotRows:      snapshotRows,
 		Patches:           patchViews,
+		Skipped:           nonNilDiagnostics(skipped),
 		AllowWrite:        s.cfg.AllowWrite,
 	}, nil
 }
@@ -2169,67 +2190,188 @@ func cloneMap(src map[string]any) map[string]any {
 	return dst
 }
 
-// generateCorpusPatches collects all violations from the backtest report and invokes remediate.Patcher
-// to produce surgical hclwrite diffs without mutating disk.
-func (s *Server) generateCorpusPatches(
-	ctx context.Context,
-	reposAbs string,
-	backtestRep *model.BlastRadiusReport,
-) ([]PatchView, []model.RemediationPatch, []model.PolicyViolation, error) {
-	if backtestRep == nil {
-		return []PatchView{}, []model.RemediationPatch{}, []model.PolicyViolation{}, nil
+type violationLookupKey struct {
+	addr   string
+	ruleID string
+}
+
+func nonNilDiagnostics(in []model.RemediationDiagnostic) []model.RemediationDiagnostic {
+	if in == nil {
+		return []model.RemediationDiagnostic{}
+	}
+	return in
+}
+
+func resolveRepoSubdir(reposAbs, repoName string) (string, string, bool) {
+	trimmed := strings.TrimSpace(repoName)
+	if trimmed == "" {
+		return "", "", false
+	}
+	candidates := []string{trimmed}
+	if alt := derivePatchKey("", trimmed); alt != "" && alt != trimmed {
+		candidates = append(candidates, alt)
+	}
+	for _, cand := range candidates {
+		if cand == "." || cand == ".." {
+			continue
+		}
+		candAbs, candRel, err := resolvePathUnderRoot(reposAbs, cand)
+		if err != nil || candRel == "." || candRel == "" {
+			continue
+		}
+		info, statErr := os.Stat(candAbs)
+		if statErr == nil && info.IsDir() {
+			return candAbs, filepath.ToSlash(candRel), true
+		}
+	}
+	return "", "", false
+}
+
+func appendRemediationReportResults(
+	reposRelSlash string,
+	repoSubRel string,
+	defaultRepoName string,
+	violations []model.PolicyViolation,
+	repoByAddr map[string]string,
+	rep *model.RemediationReport,
+	views []PatchView,
+	rawPatches []model.RemediationPatch,
+	skipped []model.RemediationDiagnostic,
+) ([]PatchView, []model.RemediationPatch, []model.RemediationDiagnostic) {
+	if rep == nil {
+		return views, rawPatches, skipped
 	}
 
-	var allViolations []model.PolicyViolation
-	violationByAddr := make(map[string]model.PolicyViolation)
-	repoByAddr := make(map[string]string)
-
-	for _, ri := range backtestRep.RepoImpacts {
-		for _, v := range ri.Violations {
-			allViolations = append(allViolations, v)
-			violationByAddr[v.ResourceAddress] = v
-			repoByAddr[v.ResourceAddress] = ri.RepoName
+	violationByAddr := make(map[string]model.PolicyViolation, len(violations))
+	violationByKey := make(map[violationLookupKey]model.PolicyViolation, len(violations))
+	for _, v := range violations {
+		violationByAddr[v.ResourceAddress] = v
+		if v.RuleID != "" {
+			violationByKey[violationLookupKey{addr: v.ResourceAddress, ruleID: v.RuleID}] = v
 		}
 	}
 
-	if len(allViolations) == 0 {
-		return []PatchView{}, []model.RemediationPatch{}, []model.PolicyViolation{}, nil
-	}
-
-	if _, err := os.Stat(reposAbs); err != nil {
-		return []PatchView{}, []model.RemediationPatch{}, allViolations, nil
-	}
-
-	rawPatches, err := s.patcher.GeneratePatches(ctx, reposAbs, allViolations)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("generating HCL remediation patches: %w", err)
-	}
-
-	_, reposRelSlash, _ := s.ResolveWorkspaceRel(reposAbs)
-
-	views := make([]PatchView, 0, len(rawPatches))
-	for _, rp := range rawPatches {
+	for _, rp := range rep.Patches {
 		v := violationByAddr[rp.ResourceAddress]
-		repoName := repoByAddr[rp.ResourceAddress]
-		key := derivePatchKey(rp.FilePath, repoName)
-		fullRelPath := filepath.ToSlash(filepath.Join(reposRelSlash, rp.FilePath))
+		if rp.RuleID != "" {
+			if exact, ok := violationByKey[violationLookupKey{addr: rp.ResourceAddress, ruleID: rp.RuleID}]; ok {
+				v = exact
+			}
+		}
+		ruleID := v.RuleID
+		if ruleID == "" {
+			ruleID = rp.RuleID
+		}
+		repoName := defaultRepoName
+		if repoName == "" && repoByAddr != nil {
+			repoName = repoByAddr[rp.ResourceAddress]
+		}
+
+		rpCopy := rp
+		if repoSubRel != "" && rpCopy.FilePath != "" {
+			rpCopy.FilePath = path.Join(repoSubRel, filepath.ToSlash(rpCopy.FilePath))
+		}
+		rawPatches = append(rawPatches, rpCopy)
+
+		key := derivePatchKey(rpCopy.FilePath, repoName)
+		fullRelPath := filepath.ToSlash(filepath.Join(reposRelSlash, filepath.FromSlash(rpCopy.FilePath)))
 
 		views = append(views, PatchView{
 			Key:             key,
 			RepoName:        repoName,
 			FilePath:        fullRelPath,
-			ResourceAddress: rp.ResourceAddress,
-			RuleID:          v.RuleID,
+			ResourceAddress: rpCopy.ResourceAddress,
+			RuleID:          ruleID,
 			Severity:        v.Severity,
 			Remediation:     v.Remediation,
-			OriginalHCL:     rp.OriginalHCL,
-			PatchedHCL:      rp.PatchedHCL,
-			UnifiedDiff:     rp.UnifiedDiff,
+			OriginalHCL:     rpCopy.OriginalHCL,
+			PatchedHCL:      rpCopy.PatchedHCL,
+			UnifiedDiff:     rpCopy.UnifiedDiff,
 			Applied:         false,
 		})
 	}
 
-	return views, rawPatches, allViolations, nil
+	for _, d := range rep.Skipped {
+		dCopy := d
+		if dCopy.FilePath != "" {
+			if repoSubRel != "" {
+				dCopy.FilePath = path.Join(repoSubRel, filepath.ToSlash(dCopy.FilePath))
+			}
+			dCopy.FilePath = filepath.ToSlash(filepath.Join(reposRelSlash, filepath.FromSlash(dCopy.FilePath)))
+		}
+		if len(dCopy.AttributePath) > 0 {
+			dCopy.AttributePath = append([]string(nil), dCopy.AttributePath...)
+		}
+		skipped = append(skipped, dCopy)
+	}
+
+	return views, rawPatches, skipped
+}
+
+// generateCorpusPatches collects all violations from the backtest report and invokes remediate.Patcher
+// per matching repo subdirectory (falling back to reposAbs when no per-repo subdirectory exists)
+// to produce surgical hclwrite diffs and manual-review skipped diagnostics without mutating disk.
+func (s *Server) generateCorpusPatches(
+	ctx context.Context,
+	reposAbs string,
+	backtestRep *model.BlastRadiusReport,
+) ([]PatchView, []model.RemediationPatch, []model.RemediationDiagnostic, []model.PolicyViolation, error) {
+	if backtestRep == nil {
+		return []PatchView{}, []model.RemediationPatch{}, []model.RemediationDiagnostic{}, []model.PolicyViolation{}, nil
+	}
+
+	var allViolations []model.PolicyViolation
+	for _, ri := range backtestRep.RepoImpacts {
+		allViolations = append(allViolations, ri.Violations...)
+	}
+
+	if len(allViolations) == 0 {
+		return []PatchView{}, []model.RemediationPatch{}, []model.RemediationDiagnostic{}, []model.PolicyViolation{}, nil
+	}
+
+	if _, err := os.Stat(reposAbs); err != nil {
+		return []PatchView{}, []model.RemediationPatch{}, []model.RemediationDiagnostic{}, allViolations, nil
+	}
+
+	_, reposRelSlash, _ := s.ResolveWorkspaceRel(reposAbs)
+	views := make([]PatchView, 0)
+	rawPatches := make([]model.RemediationPatch, 0)
+	skipped := make([]model.RemediationDiagnostic, 0)
+
+	var unmatchedViolations []model.PolicyViolation
+	unmatchedRepoByAddr := make(map[string]string)
+
+	for _, ri := range backtestRep.RepoImpacts {
+		if len(ri.Violations) == 0 {
+			continue
+		}
+		if repoDirAbs, repoSubRel, ok := resolveRepoSubdir(reposAbs, ri.RepoName); ok {
+			rep, err := s.patcher.GenerateRemediationReport(ctx, repoDirAbs, ri.Violations)
+			if err != nil {
+				return nil, nil, nil, nil, fmt.Errorf("generating HCL remediation patches for %s: %w", ri.RepoName, err)
+			}
+			views, rawPatches, skipped = appendRemediationReportResults(
+				reposRelSlash, repoSubRel, ri.RepoName, ri.Violations, nil, rep, views, rawPatches, skipped,
+			)
+			continue
+		}
+		for _, v := range ri.Violations {
+			unmatchedViolations = append(unmatchedViolations, v)
+			unmatchedRepoByAddr[v.ResourceAddress] = ri.RepoName
+		}
+	}
+
+	if len(unmatchedViolations) > 0 {
+		rep, err := s.patcher.GenerateRemediationReport(ctx, reposAbs, unmatchedViolations)
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("generating HCL remediation patches: %w", err)
+		}
+		views, rawPatches, skipped = appendRemediationReportResults(
+			reposRelSlash, "", "", unmatchedViolations, unmatchedRepoByAddr, rep, views, rawPatches, skipped,
+		)
+	}
+
+	return views, rawPatches, skipped, allViolations, nil
 }
 
 func derivePatchKey(filePath, repoName string) string {

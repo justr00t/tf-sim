@@ -74,6 +74,7 @@
     'data-azure': Object.assign({}, fallbackPatches['data-azure']),
     'ml-gcp': Object.assign({}, fallbackPatches['ml-gcp'])
   };
+  let liveSkipped = [];
 
   function escapeHtml(str) {
     return String(str)
@@ -154,6 +155,30 @@
     });
   }
 
+  function renderSkippedDiagnosticsPanel() {
+    const panel = document.getElementById('rem-skipped-panel');
+    const countEl = document.getElementById('rem-skipped-count');
+    const listEl = document.getElementById('rem-skipped-list');
+    if (!panel || !countEl || !listEl) return;
+
+    if (liveSkipped.length > 0) {
+      panel.hidden = false;
+      countEl.textContent = String(liveSkipped.length);
+      listEl.innerHTML = liveSkipped.map(function (d) {
+        const reason = escapeHtml(d.reason || 'manual_review');
+        const addr = escapeHtml(d.resource_address || '');
+        const ruleId = escapeHtml(d.rule_id || 'UNKNOWN');
+        const detail = escapeHtml(d.detail || '');
+        const guidance = d.guidance ? (' <span>Guidance: ' + escapeHtml(d.guidance) + '</span>') : '';
+        return '<div style="margin-top:0.35rem;"><code>[' + reason + ']</code> <code>' + addr + '</code> (<code>' + ruleId + '</code>) — ' + detail + guidance + '</div>';
+      }).join('');
+    } else {
+      panel.hidden = true;
+      countEl.textContent = '0';
+      listEl.innerHTML = '';
+    }
+  }
+
   function renderPatch(key) {
     const keys = Object.keys(livePatches);
     const titleEl = document.getElementById('patch-file-title');
@@ -163,11 +188,30 @@
 
     if (keys.length === 0) {
       activePatchKey = '';
-      if (titleEl) titleEl.textContent = 'No HCL Patches Staged';
-      if (addrEl) addrEl.innerHTML = '<code>None (0 violations or no matching .tf files)</code>';
-      if (attrEl) attrEl.innerHTML = '<code>N/A</code>';
-      if (container) {
-        container.innerHTML = '<div class="code-line"><span class="code-ln">1</span><span class="code-src"># No surgical HCL patches are currently staged. Upload .tf files alongside violating plan.json files to generate hclwrite diffs.</span></div>';
+      if (liveSkipped.length > 0) {
+        const firstSkip = liveSkipped[0];
+        if (titleEl) titleEl.textContent = 'Manual Review Required (' + liveSkipped.length + ' Skipped)';
+        if (addrEl) addrEl.innerHTML = '<code>' + escapeHtml(firstSkip.resource_address || '') + '</code>';
+        if (attrEl) attrEl.innerHTML = '<code>' + escapeHtml(firstSkip.reason || 'manual_review') + '</code>';
+        if (container) {
+          const lines = [];
+          liveSkipped.forEach(function (d) {
+            lines.push('# [' + (d.reason || 'manual_review') + '] ' + (d.resource_address || '') + ' (' + (d.rule_id || 'UNKNOWN') + '): ' + (d.detail || ''));
+            if (d.guidance) {
+              lines.push('#   Guidance: ' + d.guidance);
+            }
+          });
+          container.innerHTML = lines.map(function (lineText, idx) {
+            return '<div class="code-line"><span class="code-ln">' + (idx + 1) + '</span><span class="code-src">' + escapeHtml(lineText) + '</span></div>';
+          }).join('');
+        }
+      } else {
+        if (titleEl) titleEl.textContent = 'No HCL Patches Staged';
+        if (addrEl) addrEl.innerHTML = '<code>None (0 violations or no matching .tf files)</code>';
+        if (attrEl) attrEl.innerHTML = '<code>N/A</code>';
+        if (container) {
+          container.innerHTML = '<div class="code-line"><span class="code-ln">1</span><span class="code-src"># No surgical HCL patches are currently staged. Upload .tf files alongside violating plan.json files to generate hclwrite diffs.</span></div>';
+        }
       }
       updateCliPreview(root.getAttribute('data-view') || 'backtest');
       return;
@@ -553,6 +597,7 @@
     const totalViolations = bt.total_violations || 0;
     const diags = (ws.verification && ws.verification.diagnostics) ? ws.verification.diagnostics : [];
     const patches = Array.isArray(ws.patches) ? ws.patches : [];
+    liveSkipped = (!isEmpty && Array.isArray(ws.skipped)) ? ws.skipped : [];
     const rows = Array.isArray(ws.snapshot_rows) ? ws.snapshot_rows : [];
 
     // Update top bar pills
@@ -662,6 +707,13 @@
       document.getElementById('metric-patches').textContent = patches.length + ' .patch';
     }
 
+    const patchesSubEl = document.getElementById('metric-patches-sub');
+    if (patchesSubEl && !isEmpty) {
+      patchesSubEl.textContent = liveSkipped.length > 0
+        ? (liveSkipped.length + ' manual review required')
+        : 'hclwrite comment-safe';
+    }
+
     // Update Stage A Table & Provider Strip
     updateProviderFilterCountsAndStrip(rows, stateName, isEmpty);
     renderSnapshotRowsTable(rows, stateName, isEmpty);
@@ -711,6 +763,7 @@
       }
     }
 
+    renderSkippedDiagnosticsPanel();
     renderPatch(activePatchKey);
     updateCliPreview(root.getAttribute('data-view') || 'backtest');
   }
@@ -728,9 +781,17 @@
         active_policy_name: 'No policy loaded',
         backtest: { total_repos_analyzed: 0, blocked_plans_count: 0, total_resources: 0, total_violations: 0 },
         snapshot_rows: [],
-        patches: []
+        patches: [],
+        skipped: []
       });
       return;
+    }
+
+    liveSkipped = [];
+    renderSkippedDiagnosticsPanel();
+    const patchesSubEl = document.getElementById('metric-patches-sub');
+    if (patchesSubEl) {
+      patchesSubEl.textContent = 'hclwrite comment-safe';
     }
 
     const stamp = document.getElementById('verdict-stamp');

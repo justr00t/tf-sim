@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/justr00t/tf-sim/internal/model"
 )
 
 // resolveTestWorkspaceRoot locates the repository root directory containing testdata/.
@@ -1251,6 +1253,195 @@ func TestServer_Security_CSRFAndOriginProtection(t *testing.T) {
 					t.Errorf("expected 200 OK for valid loopback Origin %q, got %d: %s", goodOrigin, rec.Code, rec.Body.String())
 				}
 			})
+		}
+	})
+}
+
+// TestServer_RemediateDiagnosticsInWorkspaceAndRemediateAPI verifies skipped diagnostics in /api/workspace and /api/remediate.
+func TestServer_RemediateDiagnosticsInWorkspaceAndRemediateAPI(t *testing.T) {
+	srcRoot := resolveTestWorkspaceRoot(t)
+	wsRoot := t.TempDir()
+
+	for _, dir := range []string{
+		filepath.Join(wsRoot, "policies"),
+		filepath.Join(wsRoot, "schemas"),
+		filepath.Join(wsRoot, "plans"),
+		filepath.Join(wsRoot, "repos", "demo"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	ebsPolicy, err := os.ReadFile(filepath.Join(srcRoot, "policies", "aws", "ebs.rego"))
+	if err != nil {
+		t.Fatalf("read ebs.rego: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wsRoot, "policies", "ebs.rego"), ebsPolicy, 0o600); err != nil {
+		t.Fatalf("write ebs.rego: %v", err)
+	}
+
+	schemaBytes, err := os.ReadFile(filepath.Join(srcRoot, "testdata", "schemas", "starter_pack_schema.json"))
+	if err != nil {
+		t.Fatalf("read starter_pack_schema.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wsRoot, "schemas", "schema.json"), schemaBytes, 0o600); err != nil {
+		t.Fatalf("write schema.json: %v", err)
+	}
+
+	mainTF := `variable "enable_ebs" {
+  type    = bool
+  default = false
+}
+
+module "ext_ebs" {
+  source = "terraform-aws-modules/ebs/aws"
+}
+
+resource "aws_ebs_volume" "local_bad" {
+  availability_zone = "us-east-1a"
+  size              = 20
+  encrypted         = false
+}
+
+resource "aws_ebs_volume" "var_driven" {
+  availability_zone = "us-east-1a"
+  size              = 20
+  encrypted         = var.enable_ebs
+}
+`
+	if err := os.WriteFile(filepath.Join(wsRoot, "repos", "demo", "main.tf"), []byte(mainTF), 0o600); err != nil {
+		t.Fatalf("write main.tf: %v", err)
+	}
+
+	plan := map[string]any{
+		"format_version":    "1.2",
+		"terraform_version": "1.9.0",
+		"resource_changes": []map[string]any{
+			{
+				"address": "aws_ebs_volume.local_bad",
+				"mode":    "managed",
+				"type":    "aws_ebs_volume",
+				"name":    "local_bad",
+				"change": map[string]any{
+					"actions": []string{"create"},
+					"after":   map[string]any{"encrypted": false},
+				},
+			},
+			{
+				"address": "module.ext_ebs.aws_ebs_volume.this",
+				"mode":    "managed",
+				"type":    "aws_ebs_volume",
+				"name":    "this",
+				"change": map[string]any{
+					"actions": []string{"create"},
+					"after":   map[string]any{"encrypted": false},
+				},
+			},
+			{
+				"address": "aws_ebs_volume.var_driven",
+				"mode":    "managed",
+				"type":    "aws_ebs_volume",
+				"name":    "var_driven",
+				"change": map[string]any{
+					"actions": []string{"create"},
+					"after":   map[string]any{"encrypted": false},
+				},
+			},
+		},
+	}
+	planBytes, _ := json.Marshal(plan)
+	if err := os.WriteFile(filepath.Join(wsRoot, "plans", "demo.json"), planBytes, 0o600); err != nil {
+		t.Fatalf("write demo.json: %v", err)
+	}
+
+	srv, err := NewServer(Config{
+		Addr:         "127.0.0.1:0",
+		WorkspaceDir: wsRoot,
+		PolicyPath:   "policies/ebs.rego",
+		SchemaPath:   "schemas/schema.json",
+		CorpusDir:    "plans",
+		ReposDir:     "repos",
+		Workers:      2,
+		AllowWrite:   false,
+	})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	type diagEnvelope struct {
+		Patches []json.RawMessage           `json:"patches"`
+		Skipped []model.RemediationDiagnostic `json:"skipped"`
+	}
+
+	assertDiagnostics := func(t *testing.T, body []byte) {
+		t.Helper()
+		var env diagEnvelope
+		if err := json.Unmarshal(body, &env); err != nil {
+			t.Fatalf("unmarshal response: %v\n%s", err, string(body))
+		}
+		if len(env.Patches) != 1 {
+			t.Fatalf("expected 1 patch, got %d", len(env.Patches))
+		}
+		if env.Skipped == nil || len(env.Skipped) != 2 {
+			t.Fatalf("expected 2 non-nil skipped diagnostics, got %+v", env.Skipped)
+		}
+		byReason := map[model.RemediationSkipReason]model.RemediationDiagnostic{}
+		for _, d := range env.Skipped {
+			byReason[d.Reason] = d
+		}
+		extDiag, ok := byReason[model.SkipReasonExternalModuleSource]
+		if !ok {
+			t.Fatalf("missing external_module_source diagnostic in %+v", env.Skipped)
+		}
+		if extDiag.FilePath != "repos/demo/main.tf" {
+			t.Errorf("expected workspace-relative FilePath 'repos/demo/main.tf', got %q", extDiag.FilePath)
+		}
+		varDiag, ok := byReason[model.SkipReasonUnsupportedExpression]
+		if !ok {
+			t.Fatalf("missing unsupported_expression diagnostic in %+v", env.Skipped)
+		}
+		if varDiag.FilePath != "repos/demo/main.tf" {
+			t.Errorf("expected workspace-relative FilePath 'repos/demo/main.tf', got %q", varDiag.FilePath)
+		}
+	}
+
+	t.Run("GET_Workspace", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/workspace", nil)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/workspace status = %d: %s", rec.Code, rec.Body.String())
+		}
+		assertDiagnostics(t, rec.Body.Bytes())
+	})
+
+	t.Run("POST_Remediate", func(t *testing.T) {
+		req := newJSONRequest(http.MethodPost, "/api/remediate", bytes.NewReader([]byte(`{}`)))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST /api/remediate status = %d: %s", rec.Code, rec.Body.String())
+		}
+		assertDiagnostics(t, rec.Body.Bytes())
+	})
+
+	t.Run("POST_Remediate_FilteredByAddress", func(t *testing.T) {
+		req := newJSONRequest(http.MethodPost, "/api/remediate", bytes.NewReader([]byte(`{"resource_address":"aws_ebs_volume.var_driven"}`)))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST /api/remediate filtered status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var env diagEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal filtered response: %v", err)
+		}
+		if len(env.Patches) != 0 {
+			t.Errorf("expected 0 patches for var_driven filter, got %d", len(env.Patches))
+		}
+		if len(env.Skipped) != 1 || env.Skipped[0].Reason != model.SkipReasonUnsupportedExpression {
+			t.Errorf("expected 1 unsupported_expression diagnostic, got %+v", env.Skipped)
 		}
 	})
 }

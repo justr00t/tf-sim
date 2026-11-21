@@ -67,7 +67,7 @@ type VerificationResult struct {
 
 // RemediationSpec describes a deterministic HCL attribute fix emitted by a Rego deny rule.
 type RemediationSpec struct {
-	AttributePath []string `json:"attribute_path"` // e.g., ["server_side_encryption_configuration", "rule", "bucket_key_enabled"]
+	AttributePath []string `json:"attribute_path"`  // e.g., ["server_side_encryption_configuration", "rule", "bucket_key_enabled"]
 	SuggestedVal  any      `json:"suggested_value"` // string, bool, number
 	Description   string   `json:"description"`
 }
@@ -75,7 +75,7 @@ type RemediationSpec struct {
 // PolicyViolation represents a single non-compliant resource flagged during policy evaluation.
 type PolicyViolation struct {
 	RuleID          string           `json:"rule_id"`
-	Severity        string           `json:"severity"`         // "CRITICAL", "HIGH", "MEDIUM", "LOW"
+	Severity        string           `json:"severity"` // "CRITICAL", "HIGH", "MEDIUM", "LOW"
 	Message         string           `json:"message"`
 	ResourceAddress string           `json:"resource_address"` // e.g., "azurerm_storage_account.main"
 	ResourceType    string           `json:"resource_type"`    // e.g., "azurerm_storage_account"
@@ -117,9 +117,53 @@ type BlastRadiusReport struct {
 type RemediationPatch struct {
 	FilePath        string `json:"file_path"`
 	ResourceAddress string `json:"resource_address"`
+	RuleID          string `json:"rule_id,omitempty"`
 	OriginalHCL     string `json:"original_hcl"`
 	PatchedHCL      string `json:"patched_hcl"`
 	UnifiedDiff     string `json:"unified_diff"`
+}
+
+// RemediationSkipReason identifies why a PolicyViolation was skipped for manual review instead of auto-patched.
+type RemediationSkipReason string
+
+const (
+	SkipReasonMissingRemediationMetadata RemediationSkipReason = "missing_remediation_metadata"
+	SkipReasonExternalModuleSource       RemediationSkipReason = "external_module_source"
+	SkipReasonUnresolvedLocalModule      RemediationSkipReason = "unresolved_local_module"
+	SkipReasonPathTraversalBlocked       RemediationSkipReason = "path_traversal_blocked"
+	SkipReasonResourceBlockNotFound      RemediationSkipReason = "resource_block_not_found"
+	SkipReasonUnsupportedExpression      RemediationSkipReason = "unsupported_expression"
+	SkipReasonInvalidResourceAddress     RemediationSkipReason = "invalid_resource_address"
+)
+
+// RemediationDiagnostic explains why a specific PolicyViolation was not auto-patched.
+type RemediationDiagnostic struct {
+	RuleID          string                `json:"rule_id"`
+	Severity        string                `json:"severity"`
+	ResourceAddress string                `json:"resource_address"`
+	ResourceType    string                `json:"resource_type,omitempty"`
+	ResourceName    string                `json:"resource_name,omitempty"`
+	Reason          RemediationSkipReason `json:"reason"`
+	FilePath        string                `json:"file_path,omitempty"`
+	ModuleSource    string                `json:"module_source,omitempty"`
+	AttributePath   []string              `json:"attribute_path,omitempty"`
+	Detail          string                `json:"detail"`
+	Guidance        string                `json:"guidance"`
+}
+
+// RemediationSummary provides deterministic aggregate counts for a RemediationReport.
+type RemediationSummary struct {
+	TotalViolations int            `json:"total_violations"`
+	PatchedCount    int            `json:"patched_count"`
+	SkippedCount    int            `json:"skipped_count"`
+	ByReason        map[string]int `json:"by_reason"`
+}
+
+// RemediationReport encapsulates surgical HCL patches, skipped diagnostics, and summary counts.
+type RemediationReport struct {
+	Patches []RemediationPatch      `json:"patches"`
+	Skipped []RemediationDiagnostic `json:"skipped"`
+	Summary RemediationSummary      `json:"summary"`
 }
 
 // PolicyContent represents an in-memory Rego policy source paired with its logical or filesystem path.
@@ -172,6 +216,12 @@ type ContentBacktestRunner interface {
 // RemediationGenerator defines the contract for surgical HCL AST patching.
 type RemediationGenerator interface {
 	GeneratePatches(ctx context.Context, tfDir string, violations []PolicyViolation) ([]RemediationPatch, error)
+}
+
+// DetailedRemediationGenerator extends RemediationGenerator with structured skipped-violation diagnostics.
+type DetailedRemediationGenerator interface {
+	RemediationGenerator
+	GenerateRemediationReport(ctx context.Context, tfDir string, violations []PolicyViolation) (*RemediationReport, error)
 }
 
 // ScrubSummary summarizes the streaming redaction and sanitization pass over a Terraform plan.

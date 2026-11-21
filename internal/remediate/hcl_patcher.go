@@ -5,23 +5,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
-	"github.com/justr00t/tf-sim/internal/model"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
+	"github.com/justr00t/tf-sim/internal/model"
 	"github.com/zclconf/go-cty/cty"
 )
 
-// Ensure Patcher implements model.RemediationGenerator at compile time.
+const maxTFFileBytes = 4 * 1024 * 1024
+
+// Ensure Patcher implements model.RemediationGenerator and model.DetailedRemediationGenerator at compile time.
 var _ model.RemediationGenerator = (*Patcher)(nil)
+var _ model.DetailedRemediationGenerator = (*Patcher)(nil)
 
 // Patcher implements surgical HCL AST remediation and unified diff generation.
 type Patcher struct {
@@ -60,6 +63,16 @@ type parsedTFFile struct {
 // HCL resource blocks in-memory, and returns deterministic RemediationPatch objects with unified diffs.
 // If WithWriteChanges(true) was configured, it also writes the patched files to disk via ApplyPatches.
 func (p *Patcher) GeneratePatches(ctx context.Context, tfDir string, violations []model.PolicyViolation) ([]model.RemediationPatch, error) {
+	rep, err := p.GenerateRemediationReport(ctx, tfDir, violations)
+	if err != nil {
+		return nil, err
+	}
+	return rep.Patches, nil
+}
+
+// GenerateRemediationReport scans .tf files in tfDir and accounts for every PolicyViolation as either
+// a surgical HCL patch (Patches) or a structured manual-review diagnostic (Skipped).
+func (p *Patcher) GenerateRemediationReport(ctx context.Context, tfDir string, violations []model.PolicyViolation) (*model.RemediationReport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -72,6 +85,7 @@ func (p *Patcher) GeneratePatches(ctx context.Context, tfDir string, violations 
 	if err != nil {
 		return nil, fmt.Errorf("resolving tfDir %q: %w", tfDir, err)
 	}
+	absDir = filepath.Clean(absDir)
 
 	info, err := os.Stat(absDir)
 	if err != nil {
@@ -81,21 +95,22 @@ func (p *Patcher) GeneratePatches(ctx context.Context, tfDir string, violations 
 		return nil, fmt.Errorf("tfDir %q is not a directory", tfDir)
 	}
 
+	rep := &model.RemediationReport{
+		Patches: []model.RemediationPatch{},
+		Skipped: []model.RemediationDiagnostic{},
+		Summary: model.RemediationSummary{
+			TotalViolations: len(violations),
+			ByReason:        map[string]int{},
+		},
+	}
+
 	if len(violations) == 0 {
-		return []model.RemediationPatch{}, nil
+		return rep, nil
 	}
 
 	// Validate candidate violations upfront so invalid attribute paths or unsupported SuggestedVal types fail fast.
-	type actionableViolation struct {
-		violation   model.PolicyViolation
-		moduleChain []string
-		resType     string
-		resName     string
-		ctyVal      cty.Value
-	}
-
-	var actionable []actionableViolation
-	for _, v := range violations {
+	precomputedVals := make([]cty.Value, len(violations))
+	for idx, v := range violations {
 		if v.Remediation == nil || len(v.Remediation.AttributePath) == 0 {
 			continue
 		}
@@ -108,21 +123,152 @@ func (p *Patcher) GeneratePatches(ctx context.Context, tfDir string, violations 
 		if err != nil {
 			return nil, fmt.Errorf("converting remediation value for resource %q: %w", v.ResourceAddress, err)
 		}
-		moduleChain, _, _ := parseResourceAddress(v.ResourceAddress)
-		resType, resName := resolveResourceTypeAndName(v)
-		if resType == "" || resName == "" {
-			continue
-		}
-		actionable = append(actionable, actionableViolation{
-			violation:   v,
-			moduleChain: moduleChain,
-			resType:     resType,
-			resName:     resName,
-			ctyVal:      ctyVal,
-		})
+		precomputedVals[idx] = ctyVal
 	}
 
-	// Discover .tf files in tfDir while skipping symlinks.
+	parsedFiles, filesByDir, err := discoverAndParseTFFiles(ctx, absDir, tfDir)
+	if err != nil {
+		return nil, err
+	}
+
+	recordSkip := func(v model.PolicyViolation, resType, resName string, reason model.RemediationSkipReason, filePath, moduleSource, detail, guidance string) {
+		var attrPath []string
+		if v.Remediation != nil && len(v.Remediation.AttributePath) > 0 {
+			attrPath = append([]string(nil), v.Remediation.AttributePath...)
+		}
+		rep.Skipped = append(rep.Skipped, model.RemediationDiagnostic{
+			RuleID:          v.RuleID,
+			Severity:        v.Severity,
+			ResourceAddress: v.ResourceAddress,
+			ResourceType:    resType,
+			ResourceName:    resName,
+			Reason:          reason,
+			FilePath:        filePath,
+			ModuleSource:    moduleSource,
+			AttributePath:   attrPath,
+			Detail:          detail,
+			Guidance:        guidance,
+		})
+		rep.Summary.SkippedCount++
+		rep.Summary.ByReason[string(reason)]++
+	}
+
+	for idx, v := range violations {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		resType, resName := resolveResourceTypeAndName(v)
+		displayAddr := v.ResourceAddress
+		if displayAddr == "" && resType != "" && resName != "" {
+			displayAddr = resType + "." + resName
+		}
+
+		if v.Remediation == nil || len(v.Remediation.AttributePath) == 0 {
+			recordSkip(
+				v, resType, resName,
+				model.SkipReasonMissingRemediationMetadata,
+				"", "",
+				fmt.Sprintf("Policy rule %q does not define auto-remediation metadata (attribute_path) for %q.", v.RuleID, displayAddr),
+				"Review the policy violation message and update the Terraform resource configuration manually.",
+			)
+			continue
+		}
+
+		if resType == "" || resName == "" {
+			recordSkip(
+				v, resType, resName,
+				model.SkipReasonInvalidResourceAddress,
+				"", "",
+				fmt.Sprintf("Could not extract a valid Terraform resource type and name from address %q.", v.ResourceAddress),
+				"Verify the plan resource address format (for example, <resource_type>.<name> or module.<mod>.<resource_type>.<name>) and remediate manually.",
+			)
+			continue
+		}
+
+		moduleChain, _, _ := parseResourceAddress(v.ResourceAddress)
+		var candidateFiles []*parsedTFFile
+		if len(moduleChain) == 0 {
+			if len(filesByDir["."]) > 0 {
+				candidateFiles = filesByDir["."]
+			} else {
+				candidateFiles = parsedFiles
+			}
+		} else {
+			targetDir, modSkip := resolveModuleTarget(absDir, filesByDir, moduleChain)
+			if modSkip != nil {
+				recordSkip(v, resType, resName, modSkip.reason, modSkip.filePath, modSkip.moduleSource, modSkip.detail, modSkip.guidance)
+				continue
+			}
+			candidateFiles = filesByDir[targetDir]
+		}
+
+		if isDataSourceAddress(v.ResourceAddress) {
+			recordSkip(
+				v, resType, resName,
+				model.SkipReasonResourceBlockNotFound,
+				"", "",
+				fmt.Sprintf("Address %q references a read-only data source, which cannot be patched as a managed resource block.", v.ResourceAddress),
+				"Data sources are read-only; remediate the underlying managed resource or adjust the data source filters manually.",
+			)
+			continue
+		}
+
+		foundBlock := false
+		for _, pf := range candidateFiles {
+			block := findResourceBlock(pf.hclFile.Body(), resType, resName)
+			if block == nil {
+				continue
+			}
+			foundBlock = true
+
+			if detail, guidance, safe := validateBlockRemediationSafety(block, pf.relPath, v.Remediation.AttributePath, displayAddr); !safe {
+				recordSkip(v, resType, resName, model.SkipReasonUnsupportedExpression, pf.relPath, "", detail, guidance)
+				break
+			}
+
+			if err := applyRemediationToBlock(block, v.Remediation.AttributePath, precomputedVals[idx]); err != nil {
+				return nil, fmt.Errorf("applying remediation to %s in %s: %w", displayAddr, pf.relPath, err)
+			}
+
+			formatted := hclwrite.Format(pf.hclFile.Bytes())
+			normalizedPatched := string(bytes.ReplaceAll(formatted, []byte("\r\n"), []byte("\n")))
+			unifiedDiff := computeUnifiedDiff(pf.relPath, pf.originalHCL, normalizedPatched)
+
+			rep.Patches = append(rep.Patches, model.RemediationPatch{
+				FilePath:        pf.relPath,
+				ResourceAddress: displayAddr,
+				RuleID:          v.RuleID,
+				OriginalHCL:     pf.originalHCL,
+				PatchedHCL:      normalizedPatched,
+				UnifiedDiff:     unifiedDiff,
+			})
+			rep.Summary.PatchedCount++
+			break
+		}
+
+		if !foundBlock {
+			recordSkip(
+				v, resType, resName,
+				model.SkipReasonResourceBlockNotFound,
+				"", "",
+				fmt.Sprintf("No matching resource %q %q block was found in the target Terraform files.", resType, resName),
+				"Locate where this resource is declared and apply the attribute update manually.",
+			)
+		}
+	}
+
+	if p.writeChanges && len(rep.Patches) > 0 {
+		if err := p.ApplyPatches(ctx, tfDir, rep.Patches); err != nil {
+			return nil, err
+		}
+	}
+
+	return rep, nil
+}
+
+// discoverAndParseTFFiles walks absDir for regular non-symlink .tf files within maxTFFileBytes and parses them into HCL ASTs.
+func discoverAndParseTFFiles(ctx context.Context, absDir, tfDir string) ([]*parsedTFFile, map[string][]*parsedTFFile, error) {
 	var tfFiles []string
 	walkErr := filepath.WalkDir(absDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -141,10 +287,7 @@ func (p *Patcher) GeneratePatches(ctx context.Context, tfDir string, violations 
 			}
 			return nil
 		}
-		if d.IsDir() {
-			return nil
-		}
-		if !d.Type().IsRegular() {
+		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
 		if strings.EqualFold(filepath.Ext(d.Name()), ".tf") {
@@ -153,104 +296,76 @@ func (p *Patcher) GeneratePatches(ctx context.Context, tfDir string, violations 
 		return nil
 	})
 	if walkErr != nil {
-		return nil, fmt.Errorf("walking tfDir %q: %w", tfDir, walkErr)
+		return nil, nil, fmt.Errorf("walking tfDir %q: %w", tfDir, walkErr)
 	}
 
 	sort.Strings(tfFiles)
 
 	parsedFiles := make([]*parsedTFFile, 0, len(tfFiles))
+	filesByDir := make(map[string][]*parsedTFFile)
+
 	for _, fullPath := range tfFiles {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		lstat, err := os.Lstat(fullPath)
 		if err != nil {
-			return nil, fmt.Errorf("lstat %q: %w", fullPath, err)
+			return nil, nil, fmt.Errorf("lstat %q: %w", fullPath, err)
 		}
 		if lstat.Mode()&os.ModeSymlink != 0 || !lstat.Mode().IsRegular() {
 			continue
 		}
 
-		rawBytes, err := os.ReadFile(fullPath)
-		if err != nil {
-			return nil, fmt.Errorf("reading HCL file %q: %w", fullPath, err)
-		}
-
-		normalized := bytes.ReplaceAll(rawBytes, []byte("\r\n"), []byte("\n"))
 		rel, err := filepath.Rel(absDir, fullPath)
 		if err != nil {
-			return nil, fmt.Errorf("computing relative path for %q: %w", fullPath, err)
+			return nil, nil, fmt.Errorf("computing relative path for %q: %w", fullPath, err)
 		}
 		relSlash := filepath.ToSlash(rel)
 
-		hclFile, diags := hclwrite.ParseConfig(normalized, relSlash, hcl.Pos{Line: 1, Column: 1})
-		if diags.HasErrors() {
-			return nil, fmt.Errorf("parsing HCL file %s: %s", relSlash, diags.Error())
+		rawBytes, err := readTFFileBounded(fullPath, relSlash, lstat.Size())
+		if err != nil {
+			return nil, nil, err
 		}
 
-		parsedFiles = append(parsedFiles, &parsedTFFile{
+		normalized := bytes.ReplaceAll(rawBytes, []byte("\r\n"), []byte("\n"))
+		hclFile, diags := hclwrite.ParseConfig(normalized, relSlash, hcl.Pos{Line: 1, Column: 1})
+		if diags.HasErrors() {
+			return nil, nil, fmt.Errorf("parsing HCL file %s: %s", relSlash, diags.Error())
+		}
+
+		pf := &parsedTFFile{
 			relPath:     relSlash,
 			originalHCL: string(normalized),
 			hclFile:     hclFile,
-		})
-	}
-
-	filesByDir := make(map[string][]*parsedTFFile)
-	for _, pf := range parsedFiles {
-		dirKey := path.Clean(path.Dir(pf.relPath))
+		}
+		parsedFiles = append(parsedFiles, pf)
+		dirKey := path.Clean(path.Dir(relSlash))
 		filesByDir[dirKey] = append(filesByDir[dirKey], pf)
 	}
 
-	patches := make([]model.RemediationPatch, 0, len(actionable))
-	for _, av := range actionable {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
+	return parsedFiles, filesByDir, nil
+}
 
-		targetDir, resolved := resolveTargetModuleDir(absDir, filesByDir, av.moduleChain)
-		candidateFiles := parsedFiles
-		if resolved {
-			candidateFiles = filesByDir[targetDir]
-		}
-
-		for _, pf := range candidateFiles {
-			block := findResourceBlock(pf.hclFile.Body(), av.resType, av.resName)
-			if block == nil {
-				continue
-			}
-
-			if err := applyRemediationToBlock(block, av.violation.Remediation.AttributePath, av.ctyVal); err != nil {
-				return nil, fmt.Errorf("applying remediation to %s in %s: %w", av.violation.ResourceAddress, pf.relPath, err)
-			}
-
-			formatted := hclwrite.Format(pf.hclFile.Bytes())
-			normalizedPatched := string(bytes.ReplaceAll(formatted, []byte("\r\n"), []byte("\n")))
-			unifiedDiff := computeUnifiedDiff(pf.relPath, pf.originalHCL, normalizedPatched)
-
-			address := av.violation.ResourceAddress
-			if address == "" {
-				address = av.resType + "." + av.resName
-			}
-
-			patches = append(patches, model.RemediationPatch{
-				FilePath:        pf.relPath,
-				ResourceAddress: address,
-				OriginalHCL:     pf.originalHCL,
-				PatchedHCL:      normalizedPatched,
-				UnifiedDiff:     unifiedDiff,
-			})
-			break
-		}
+// readTFFileBounded enforces maxTFFileBytes before and during reading a .tf file.
+func readTFFileBounded(fullPath, relSlash string, statSize int64) ([]byte, error) {
+	if statSize > maxTFFileBytes {
+		return nil, fmt.Errorf("HCL file %s exceeds maximum size of %d bytes", relSlash, maxTFFileBytes)
 	}
-
-	if p.writeChanges && len(patches) > 0 {
-		if err := p.ApplyPatches(ctx, tfDir, patches); err != nil {
-			return nil, err
-		}
+	f, err := os.Open(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading HCL file %q: %w", fullPath, err)
 	}
+	defer f.Close()
 
-	return patches, nil
+	rawBytes, err := io.ReadAll(io.LimitReader(f, maxTFFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading HCL file %q: %w", fullPath, err)
+	}
+	if len(rawBytes) > maxTFFileBytes {
+		return nil, fmt.Errorf("HCL file %s exceeds maximum size of %d bytes", relSlash, maxTFFileBytes)
+	}
+	return rawBytes, nil
 }
 
 // ApplyPatches safely writes the PatchedHCL contents of each RemediationPatch back to disk under tfDir,
@@ -284,6 +399,7 @@ func (p *Patcher) ApplyPatches(ctx context.Context, tfDir string, patches []mode
 
 	// Validate all patch paths first and deduplicate by FilePath preserving order and latest PatchedHCL.
 	type fileWriteTarget struct {
+		rawRel     string
 		targetPath string
 		patchedHCL string
 	}
@@ -299,7 +415,11 @@ func (p *Patcher) ApplyPatches(ctx context.Context, tfDir string, patches []mode
 		if rawRel == "" {
 			return fmt.Errorf("remediation patch has empty file_path")
 		}
-		if filepath.IsAbs(rawRel) || strings.HasPrefix(rawRel, "/") || strings.HasPrefix(rawRel, `\`) {
+		if strings.ContainsRune(rawRel, 0) ||
+			filepath.IsAbs(rawRel) ||
+			filepath.VolumeName(rawRel) != "" ||
+			strings.HasPrefix(rawRel, "/") ||
+			strings.HasPrefix(rawRel, `\`) {
 			return fmt.Errorf("path traversal rejected: patch file_path %q must be relative to tfDir", patch.FilePath)
 		}
 
@@ -314,12 +434,16 @@ func (p *Patcher) ApplyPatches(ctx context.Context, tfDir string, patches []mode
 		if !strings.HasPrefix(target, absRoot+string(filepath.Separator)) {
 			return fmt.Errorf("path traversal detected: %q is outside root directory %q", patch.FilePath, tfDir)
 		}
+		if hasUncleanSymlinkSegment(absRoot, filepath.ToSlash(rawRel)) || hasSymlinkSegment(absRoot, rel) {
+			return fmt.Errorf("refusing to write through symlink path %q", patch.FilePath)
+		}
 
 		normKey := filepath.ToSlash(rel)
 		if _, exists := latestByRel[normKey]; !exists {
 			orderedFiles = append(orderedFiles, normKey)
 		}
 		latestByRel[normKey] = fileWriteTarget{
+			rawRel:     rawRel,
 			targetPath: target,
 			patchedHCL: patch.PatchedHCL,
 		}
@@ -330,6 +454,10 @@ func (p *Patcher) ApplyPatches(ctx context.Context, tfDir string, patches []mode
 			return err
 		}
 		item := latestByRel[key]
+
+		if hasUncleanSymlinkSegment(absRoot, filepath.ToSlash(item.rawRel)) || hasSymlinkSegment(absRoot, key) {
+			return fmt.Errorf("refusing to write through symlink path %q", key)
+		}
 
 		lstat, err := os.Lstat(item.targetPath)
 		if err != nil {
@@ -456,170 +584,435 @@ func stripIndexSuffix(segment string) string {
 	return s
 }
 
-// resolveTargetModuleDir resolves a module chain step-by-step starting from "." within absRoot.
-// When resolved is true, callers must restrict searching to filesByDir[targetDir] (which is empty if blocked).
-// When resolved is false, the module chain could not be mapped to a subdirectory in tfDir and callers may fall back to all parsedFiles.
-func resolveTargetModuleDir(absRoot string, filesByDir map[string][]*parsedTFFile, moduleChain []string) (string, bool) {
-	absRoot = filepath.Clean(absRoot)
-	if len(moduleChain) == 0 {
-		if len(filesByDir["."]) > 0 {
-			return ".", true
-		}
-		return "", false
+// isDataSourceAddress reports whether a Terraform resource address refers to a read-only data source.
+func isDataSourceAddress(addr string) bool {
+	segments := splitAddressSegments(addr)
+	if len(segments) == 0 {
+		return false
 	}
+	i := 0
+	for i+1 < len(segments) && stripIndexSuffix(segments[i]) == "module" {
+		i += 2
+	}
+	remaining := segments[i:]
+	return len(remaining) >= 3 && stripIndexSuffix(remaining[0]) == "data"
+}
 
+type moduleSkipInfo struct {
+	reason       model.RemediationSkipReason
+	filePath     string
+	moduleSource string
+	detail       string
+	guidance     string
+}
+
+// resolveModuleTarget resolves a module chain step-by-step starting from "." within absRoot
+// without ever falling back to scanning all repository .tf files.
+func resolveModuleTarget(absRoot string, filesByDir map[string][]*parsedTFFile, moduleChain []string) (string, *moduleSkipInfo) {
+	absRoot = filepath.Clean(absRoot)
 	currDir := "."
+
 	for _, rawMod := range moduleChain {
 		modName := stripIndexSuffix(rawMod)
 		if modName == "" {
-			return "", false
-		}
-
-		var rawSource string
-		for _, pf := range filesByDir[currDir] {
-			sources := extractModuleSources(pf.hclFile.Body())
-			if src, ok := sources[modName]; ok && src != "" {
-				rawSource = src
-				break
+			return "", &moduleSkipInfo{
+				reason:   model.SkipReasonInvalidResourceAddress,
+				detail:   "Module chain contains an empty module segment.",
+				guidance: "Verify the plan resource address format and remediate manually.",
 			}
 		}
 
-		nextDir := ""
-		if rawSource != "" {
-			candRel, escaped, ok := resolveLocalModuleDir(absRoot, currDir, rawSource)
-			if escaped {
-				return "", true
-			}
-			if ok && len(filesByDir[candRel]) > 0 {
-				nextDir = candRel
-			}
-		}
-
-		if nextDir == "" && rawSource == "" {
-			convSource := "./" + path.Join("modules", modName)
-			candRel, escaped, ok := resolveLocalModuleDir(absRoot, currDir, convSource)
-			if escaped {
-				return "", true
-			}
-			if ok && len(filesByDir[candRel]) > 0 {
-				nextDir = candRel
-			}
-		}
-
-		if nextDir == "" {
-			return "", false
+		nextDir, skip := resolveModuleStep(absRoot, filesByDir, currDir, modName)
+		if skip != nil {
+			return "", skip
 		}
 		currDir = nextDir
 	}
 
-	return currDir, true
+	return currDir, nil
 }
 
-// resolveLocalModuleDir resolves a module source path relative to currDir inside absRoot,
-// enforcing strict containment within absRoot.
-func resolveLocalModuleDir(absRoot, currDir, rawSource string) (relDir string, escaped bool, ok bool) {
-	rawSource = strings.TrimSpace(rawSource)
-	if rawSource == "" {
-		return "", false, false
-	}
-	if strings.Contains(rawSource, "://") || strings.Contains(rawSource, "::") {
-		return "", false, false
-	}
-	if filepath.IsAbs(rawSource) || strings.HasPrefix(rawSource, "/") || strings.HasPrefix(rawSource, `\`) {
-		return "", true, false
+// resolveModuleStep resolves a single module.<modName> hop from currDir using explicit module blocks first,
+// then conventional ./modules/<modName> only when no explicit module block exists in currDir.
+func resolveModuleStep(absRoot string, filesByDir map[string][]*parsedTFFile, currDir, modName string) (string, *moduleSkipInfo) {
+	for _, pf := range filesByDir[currDir] {
+		block := findModuleBlock(pf.hclFile.Body(), modName)
+		if block == nil {
+			continue
+		}
+
+		srcAttr := block.Body().GetAttribute("source")
+		if srcAttr == nil {
+			return "", &moduleSkipInfo{
+				reason:   model.SkipReasonUnresolvedLocalModule,
+				filePath: pf.relPath,
+				detail:   fmt.Sprintf("Module block %q in %s does not declare a source attribute.", modName, pf.relPath),
+				guidance: "Declare a local module source or apply the required attribute change directly inside the module definition.",
+			}
+		}
+
+		rawSource, isStatic := parseStaticStringAttr(srcAttr, pf.relPath)
+		if !isStatic {
+			return "", &moduleSkipInfo{
+				reason:   model.SkipReasonUnsupportedExpression,
+				filePath: pf.relPath,
+				detail:   fmt.Sprintf("Module %q in %s uses a non-literal source expression that cannot be resolved statically.", modName, pf.relPath),
+				guidance: "Replace the dynamic module source with a static local path or update the referenced module manually.",
+			}
+		}
+
+		if rawSource == "" {
+			return "", &moduleSkipInfo{
+				reason:   model.SkipReasonUnresolvedLocalModule,
+				filePath: pf.relPath,
+				detail:   fmt.Sprintf("Module block %q in %s has an empty source attribute.", modName, pf.relPath),
+				guidance: "Set a valid local module source path or remediate the target module directly.",
+			}
+		}
+
+		candRel, skip := classifyModuleSource(absRoot, currDir, modName, pf.relPath, rawSource)
+		if skip != nil {
+			return "", skip
+		}
+		if len(filesByDir[candRel]) == 0 {
+			return "", &moduleSkipInfo{
+				reason:       model.SkipReasonUnresolvedLocalModule,
+				filePath:     pf.relPath,
+				moduleSource: rawSource,
+				detail:       fmt.Sprintf("Local module %q source %q (declared in %s) resolved to %q, which contains no .tf files.", modName, rawSource, pf.relPath, candRel),
+				guidance:     "Ensure the local module directory and .tf files exist within the Terraform workspace, or apply the fix directly in the module source.",
+			}
+		}
+		return candRel, nil
 	}
 
-	srcSlash := filepath.ToSlash(rawSource)
-	isExplicitRelative := strings.HasPrefix(srcSlash, "./") || strings.HasPrefix(srcSlash, "../") || srcSlash == "." || srcSlash == ".."
-
-	currAbs := filepath.Join(absRoot, filepath.FromSlash(currDir))
-	candAbs := filepath.Clean(filepath.Join(currAbs, filepath.FromSlash(srcSlash)))
-
-	rel, err := filepath.Rel(absRoot, candAbs)
-	if err != nil {
-		return "", true, false
+	// No explicit module "<modName>" block in currDir; check conventional ./modules/<modName>.
+	convSource := "./" + path.Join("modules", modName)
+	candRel, skip := classifyModuleSource(absRoot, currDir, modName, "", convSource)
+	if skip != nil {
+		return "", skip
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", true, false
+	if len(filesByDir[candRel]) == 0 {
+		return "", &moduleSkipInfo{
+			reason:   model.SkipReasonUnresolvedLocalModule,
+			detail:   fmt.Sprintf("Could not resolve local module %q from %q; no matching module block or ./modules/%s directory with .tf files was found.", modName, currDir, modName),
+			guidance: "Ensure the local module block and .tf files exist within the Terraform workspace, or apply the remediation manually.",
+		}
 	}
-
-	if !isExplicitRelative {
-		return "", false, false
-	}
-
-	return path.Clean(filepath.ToSlash(rel)), false, true
+	return candRel, nil
 }
 
-// extractModuleSources scans top-level `module "<label>"` blocks in body and returns a map of
-// normalized module label -> static string value of the `source` attribute.
-func extractModuleSources(body *hclwrite.Body) map[string]string {
+// findModuleBlock searches the top-level HCL body for `module "<modName>"`.
+func findModuleBlock(body *hclwrite.Body, modName string) *hclwrite.Block {
 	if body == nil {
 		return nil
 	}
-	var sources map[string]string
 	for _, block := range body.Blocks() {
 		if block.Type() != "module" {
 			continue
 		}
 		labels := block.Labels()
-		if len(labels) != 1 {
-			continue
+		if len(labels) == 1 && stripIndexSuffix(labels[0]) == modName {
+			return block
 		}
-		modName := stripIndexSuffix(labels[0])
-		if modName == "" {
-			continue
-		}
-		srcAttr := block.Body().GetAttribute("source")
-		if srcAttr == nil {
-			continue
-		}
-		src := extractStaticStringAttr(srcAttr)
-		if src == "" {
-			continue
-		}
-		if sources == nil {
-			sources = make(map[string]string)
-		}
-		sources[modName] = src
 	}
-	return sources
+	return nil
+}
+
+// classifyModuleSource classifies a static module source string as external, path-traversal-blocked,
+// or a safe workspace-contained relative directory.
+func classifyModuleSource(absRoot, currDir, modName, declFilePath, rawSource string) (string, *moduleSkipInfo) {
+	if strings.Contains(rawSource, "://") || strings.Contains(rawSource, "::") {
+		return "", &moduleSkipInfo{
+			reason:       model.SkipReasonExternalModuleSource,
+			filePath:     declFilePath,
+			moduleSource: rawSource,
+			detail:       fmt.Sprintf("Resource belongs to external/remote module %q (source %q in %s), which cannot be patched in the local repository.", modName, rawSource, declFilePath),
+			guidance:     "Pass the compliant configuration via module input variables in the caller block or update the upstream module source version.",
+		}
+	}
+
+	if strings.ContainsRune(rawSource, 0) ||
+		filepath.IsAbs(rawSource) ||
+		filepath.VolumeName(rawSource) != "" ||
+		strings.HasPrefix(rawSource, "/") ||
+		strings.HasPrefix(rawSource, `\`) {
+		return "", &moduleSkipInfo{
+			reason:       model.SkipReasonPathTraversalBlocked,
+			filePath:     declFilePath,
+			moduleSource: rawSource,
+			detail:       fmt.Sprintf("Blocked module %q source %q because absolute or root-anchored paths cannot be traversed safely.", modName, rawSource),
+			guidance:     "Replace the absolute module source with a relative path strictly inside the Terraform root directory or remediate manually.",
+		}
+	}
+
+	srcSlash := filepath.ToSlash(rawSource)
+	isExplicitRelative := strings.HasPrefix(srcSlash, "./") || strings.HasPrefix(srcSlash, "../") || srcSlash == "." || srcSlash == ".."
+	if !isExplicitRelative {
+		return "", &moduleSkipInfo{
+			reason:       model.SkipReasonExternalModuleSource,
+			filePath:     declFilePath,
+			moduleSource: rawSource,
+			detail:       fmt.Sprintf("Resource belongs to external registry/remote module %q (source %q in %s), which cannot be patched in the local repository.", modName, rawSource, declFilePath),
+			guidance:     "Pass the compliant configuration via module input variables in the caller block or update the upstream module source version.",
+		}
+	}
+
+	currAbs := filepath.Join(absRoot, filepath.FromSlash(currDir))
+	candAbs := filepath.Clean(filepath.Join(currAbs, filepath.FromSlash(srcSlash)))
+	rel, err := filepath.Rel(absRoot, candAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", &moduleSkipInfo{
+			reason:       model.SkipReasonPathTraversalBlocked,
+			filePath:     declFilePath,
+			moduleSource: rawSource,
+			detail:       fmt.Sprintf("Blocked module %q source %q because it escapes the Terraform root directory.", modName, rawSource),
+			guidance:     "Move the module inside the Terraform root directory or remediate the external module directory directly.",
+		}
+	}
+
+	if hasUncleanSymlinkSegment(currAbs, srcSlash) || hasSymlinkSegment(absRoot, rel) {
+		return "", &moduleSkipInfo{
+			reason:       model.SkipReasonPathTraversalBlocked,
+			filePath:     declFilePath,
+			moduleSource: rawSource,
+			detail:       fmt.Sprintf("Blocked module %q source %q because it traverses a symbolic link.", modName, rawSource),
+			guidance:     "Avoid symlinked module directories or apply the remediation directly inside the target module.",
+		}
+	}
+
+	return path.Clean(filepath.ToSlash(rel)), nil
+}
+
+// hasUncleanSymlinkSegment walks rawSlash relative to baseAbs before lexical ".." collapsing
+// so paths like "./symlink/../sibling" are caught and rejected as symlink traversals.
+func hasUncleanSymlinkSegment(baseAbs, rawSlash string) bool {
+	if rawSlash == "" || rawSlash == "." {
+		return false
+	}
+	curr := filepath.Clean(baseAbs)
+	for _, seg := range strings.Split(rawSlash, "/") {
+		if seg == "" || seg == "." {
+			continue
+		}
+		if seg == ".." {
+			curr = filepath.Dir(curr)
+			continue
+		}
+		curr = filepath.Join(curr, seg)
+		lstat, err := os.Lstat(curr)
+		if err != nil {
+			return false
+		}
+		if lstat.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSymlinkSegment checks every path segment of rel inside absRoot for symlinks without resolving above absRoot.
+func hasSymlinkSegment(absRoot, rel string) bool {
+	relSlash := path.Clean(filepath.ToSlash(rel))
+	if relSlash == "." || relSlash == "" {
+		return false
+	}
+	curr := absRoot
+	for _, seg := range strings.Split(relSlash, "/") {
+		if seg == "" || seg == "." {
+			continue
+		}
+		curr = filepath.Join(curr, seg)
+		lstat, err := os.Lstat(curr)
+		if err != nil {
+			return false
+		}
+		if lstat.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// parseStaticStringAttr parses an attribute expression and extracts its trimmed literal string value
+// only when the expression is a static string literal without template interpolation or variables.
+func parseStaticStringAttr(attr *hclwrite.Attribute, filePath string) (string, bool) {
+	if attr == nil {
+		return "", false
+	}
+	exprBytes := bytes.TrimSpace(attr.Expr().BuildTokens(nil).Bytes())
+	if len(exprBytes) == 0 {
+		return "", false
+	}
+	expr, diags := hclsyntax.ParseExpression(exprBytes, filePath, hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() {
+		return "", false
+	}
+	switch e := expr.(type) {
+	case *hclsyntax.LiteralValueExpr:
+		if e.Val.Type() == cty.String && !e.Val.IsNull() {
+			return strings.TrimSpace(e.Val.AsString()), true
+		}
+		return "", false
+	case *hclsyntax.TemplateExpr:
+		var b strings.Builder
+		for _, part := range e.Parts {
+			lit, ok := part.(*hclsyntax.LiteralValueExpr)
+			if !ok || lit.Val.Type() != cty.String || lit.Val.IsNull() {
+				return "", false
+			}
+			b.WriteString(lit.Val.AsString())
+		}
+		return strings.TrimSpace(b.String()), true
+	default:
+		return "", false
+	}
 }
 
 // extractStaticStringAttr extracts the literal string value from an HCL attribute if and only if
 // the expression is a static quoted string literal without template interpolation.
 func extractStaticStringAttr(attr *hclwrite.Attribute) string {
-	if attr == nil {
-		return ""
+	val, _ := parseStaticStringAttr(attr, "")
+	return val
+}
+
+// validateBlockRemediationSafety inspects the target block read-only before any AST mutation,
+// rejecting dynamic blocks, ambiguous multiple nested blocks, block/attribute mismatches, and non-literal expressions.
+func validateBlockRemediationSafety(block *hclwrite.Block, filePath string, attrPath []string, displayAddr string) (detail string, guidance string, ok bool) {
+	currBody := block.Body()
+	for i := 0; i < len(attrPath)-1; i++ {
+		blockName := strings.TrimSpace(attrPath[i])
+		if hasDynamicBlock(currBody, blockName) {
+			return fmt.Sprintf("Resource %q in %s defines a dynamic %q block; auto-remediation will not overwrite dynamic HCL constructs.", displayAddr, filePath, blockName),
+				"Update the dynamic block content or its input variables manually.",
+				false
+		}
+		if currBody.GetAttribute(blockName) != nil {
+			return fmt.Sprintf("Resource %q in %s defines %q as an attribute expression rather than a nested HCL block.", displayAddr, filePath, blockName),
+				"Update the attribute expression or referenced variable/local manually.",
+				false
+		}
+		matches := matchingUnlabeledBlocks(currBody, blockName)
+		if len(matches) > 1 {
+			return fmt.Sprintf("Resource %q in %s contains multiple %q blocks, making the target block ambiguous for auto-remediation.", displayAddr, filePath, blockName),
+				"Inspect the multiple nested blocks in the resource and update the appropriate block manually.",
+				false
+		}
+		if len(matches) == 0 {
+			// Missing intermediate blocks will be safely appended by applyRemediationToBlock.
+			return "", "", true
+		}
+		currBody = matches[0].Body()
 	}
-	tokens := attr.Expr().BuildTokens(nil)
-	inQuote := false
-	var b strings.Builder
-	for _, tok := range tokens {
-		switch tok.Type {
-		case hclsyntax.TokenOQuote:
-			if inQuote {
-				return ""
-			}
-			inQuote = true
-		case hclsyntax.TokenQuotedLit:
-			if !inQuote {
-				return ""
-			}
-			b.Write(tok.Bytes)
-		case hclsyntax.TokenCQuote:
-			if !inQuote {
-				return ""
-			}
-			raw := b.String()
-			if unquoted, err := strconv.Unquote(`"` + raw + `"`); err == nil {
-				return strings.TrimSpace(unquoted)
-			}
-			return strings.TrimSpace(raw)
-		case hclsyntax.TokenTemplateInterp, hclsyntax.TokenTemplateControl, hclsyntax.TokenTemplateSeqEnd:
-			return ""
+
+	leafAttr := strings.TrimSpace(attrPath[len(attrPath)-1])
+	if hasDynamicBlock(currBody, leafAttr) {
+		return fmt.Sprintf("Resource %q in %s defines a dynamic %q block; auto-remediation will not overwrite dynamic HCL constructs.", displayAddr, filePath, leafAttr),
+			"Update the dynamic block content or its input variables manually.",
+			false
+	}
+	if hasBlockOfType(currBody, leafAttr) {
+		return fmt.Sprintf("Resource %q in %s defines %q as a nested block rather than a leaf attribute.", displayAddr, filePath, leafAttr),
+			"Update the nested block configuration manually.",
+			false
+	}
+
+	if existingAttr := currBody.GetAttribute(leafAttr); existingAttr != nil {
+		exprBytes := bytes.TrimSpace(existingAttr.Expr().BuildTokens(nil).Bytes())
+		expr, diags := hclsyntax.ParseExpression(exprBytes, filePath, hcl.Pos{Line: 1, Column: 1})
+		if diags.HasErrors() || !isStaticLiteralExpr(expr) {
+			return fmt.Sprintf("Attribute %q on %q in %s uses a non-literal expression (such as a variable, local, interpolation, or function call) and was left untouched.", leafAttr, displayAddr, filePath),
+				"Update the referenced variable, local, or expression in your Terraform configuration manually.",
+				false
 		}
 	}
-	return ""
+
+	return "", "", true
+}
+
+func hasDynamicBlock(body *hclwrite.Body, targetName string) bool {
+	for _, b := range body.Blocks() {
+		if b.Type() == "dynamic" && len(b.Labels()) == 1 && b.Labels()[0] == targetName {
+			return true
+		}
+	}
+	return false
+}
+
+func matchingUnlabeledBlocks(body *hclwrite.Body, blockType string) []*hclwrite.Block {
+	var matches []*hclwrite.Block
+	for _, b := range body.Blocks() {
+		if b.Type() == blockType && len(b.Labels()) == 0 {
+			matches = append(matches, b)
+		}
+	}
+	return matches
+}
+
+func hasBlockOfType(body *hclwrite.Body, blockType string) bool {
+	for _, b := range body.Blocks() {
+		if b.Type() == blockType {
+			return true
+		}
+	}
+	return false
+}
+
+// isStaticLiteralExpr reports whether an HCL syntax expression represents a purely static literal value
+// safe to overwrite without clobbering variables, locals, conditionals, function calls, or interpolations.
+func isStaticLiteralExpr(expr hclsyntax.Expression) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *hclsyntax.LiteralValueExpr:
+		return true
+	case *hclsyntax.TemplateExpr:
+		// "" has len(Parts)==0; static strings have only *hclsyntax.LiteralValueExpr parts.
+		for _, part := range e.Parts {
+			if _, ok := part.(*hclsyntax.LiteralValueExpr); !ok {
+				return false
+			}
+		}
+		return true
+	case *hclsyntax.UnaryOpExpr:
+		return e.Op == hclsyntax.OpNegate && isStaticLiteralExpr(e.Val)
+	case *hclsyntax.ParenthesesExpr:
+		return isStaticLiteralExpr(e.Expression)
+	case *hclsyntax.TupleConsExpr:
+		for _, elem := range e.Exprs {
+			if !isStaticLiteralExpr(elem) {
+				return false
+			}
+		}
+		return true
+	case *hclsyntax.ObjectConsExpr:
+		for _, item := range e.Items {
+			if !isStaticObjectKey(item.KeyExpr) || !isStaticLiteralExpr(item.ValueExpr) {
+				return false
+			}
+		}
+		return true
+	default:
+		// ScopeTraversalExpr (var.*, local.*), FunctionCallExpr, ConditionalExpr, TemplateWrapExpr, ForExpr, etc.
+		return false
+	}
+}
+
+func isStaticObjectKey(keyExpr hclsyntax.Expression) bool {
+	if keyExpr == nil {
+		return false
+	}
+	if objKey, ok := keyExpr.(*hclsyntax.ObjectConsKeyExpr); ok {
+		if objKey.ForceNonLiteral {
+			return false
+		}
+		if st, ok := objKey.Wrapped.(*hclsyntax.ScopeTraversalExpr); ok && len(st.Traversal) == 1 {
+			return true
+		}
+		return isStaticLiteralExpr(objKey.Wrapped)
+	}
+	return isStaticLiteralExpr(keyExpr)
 }
 
 // findResourceBlock searches the top-level HCL body for `resource "<resType>" "<resName>"`.
@@ -867,71 +1260,126 @@ func splitLines(s string) []string {
 	return strings.Split(trimmed, "\n")
 }
 
-// computeLCSEdits computes the Longest Common Subsequence line diff between oldLines and newLines.
+const maxLCSCells = 4_000_000
+
+// computeLCSEdits computes the Longest Common Subsequence line diff between oldLines and newLines,
+// trimming common prefix/suffix lines first and capping DP matrix size to prevent OOM DoS.
 func computeLCSEdits(oldLines, newLines []string) []diffEdit {
 	m := len(oldLines)
 	n := len(newLines)
 
-	dp := make([][]int, m+1)
-	for i := range dp {
-		dp[i] = make([]int, n+1)
+	prefix := 0
+	for prefix < m && prefix < n && oldLines[prefix] == newLines[prefix] {
+		prefix++
 	}
 
-	for i := m - 1; i >= 0; i-- {
-		for j := n - 1; j >= 0; j-- {
-			if oldLines[i] == newLines[j] {
-				dp[i][j] = 1 + dp[i+1][j+1]
-			} else if dp[i+1][j] >= dp[i][j+1] {
-				dp[i][j] = dp[i+1][j]
-			} else {
-				dp[i][j] = dp[i][j+1]
-			}
-		}
+	suffix := 0
+	for suffix < m-prefix && suffix < n-prefix && oldLines[m-1-suffix] == newLines[n-1-suffix] {
+		suffix++
 	}
 
 	edits := make([]diffEdit, 0, m+n)
-	i, j := 0, 0
-	for i < m && j < n {
-		if oldLines[i] == newLines[j] {
-			edits = append(edits, diffEdit{
-				kind:    editEqual,
-				text:    oldLines[i],
-				oldLine: i + 1,
-				newLine: j + 1,
-			})
-			i++
-			j++
-		} else if dp[i+1][j] >= dp[i][j+1] {
+	for k := 0; k < prefix; k++ {
+		edits = append(edits, diffEdit{
+			kind:    editEqual,
+			text:    oldLines[k],
+			oldLine: k + 1,
+			newLine: k + 1,
+		})
+	}
+
+	oldMid := oldLines[prefix : m-suffix]
+	newMid := newLines[prefix : n-suffix]
+	mm := len(oldMid)
+	nm := len(newMid)
+
+	if mm == 0 || nm == 0 || nm > maxLCSCells/mm {
+		for i := 0; i < mm; i++ {
 			edits = append(edits, diffEdit{
 				kind:    editDelete,
-				text:    oldLines[i],
-				oldLine: i + 1,
+				text:    oldMid[i],
+				oldLine: prefix + i + 1,
 			})
-			i++
-		} else {
+		}
+		for j := 0; j < nm; j++ {
 			edits = append(edits, diffEdit{
 				kind:    editInsert,
-				text:    newLines[j],
-				newLine: j + 1,
+				text:    newMid[j],
+				newLine: prefix + j + 1,
+			})
+		}
+	} else {
+		dp := make([][]int, mm+1)
+		for i := range dp {
+			dp[i] = make([]int, nm+1)
+		}
+
+		for i := mm - 1; i >= 0; i-- {
+			for j := nm - 1; j >= 0; j-- {
+				if oldMid[i] == newMid[j] {
+					dp[i][j] = 1 + dp[i+1][j+1]
+				} else if dp[i+1][j] >= dp[i][j+1] {
+					dp[i][j] = dp[i+1][j]
+				} else {
+					dp[i][j] = dp[i][j+1]
+				}
+			}
+		}
+
+		i, j := 0, 0
+		for i < mm && j < nm {
+			if oldMid[i] == newMid[j] {
+				edits = append(edits, diffEdit{
+					kind:    editEqual,
+					text:    oldMid[i],
+					oldLine: prefix + i + 1,
+					newLine: prefix + j + 1,
+				})
+				i++
+				j++
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				edits = append(edits, diffEdit{
+					kind:    editDelete,
+					text:    oldMid[i],
+					oldLine: prefix + i + 1,
+				})
+				i++
+			} else {
+				edits = append(edits, diffEdit{
+					kind:    editInsert,
+					text:    newMid[j],
+					newLine: prefix + j + 1,
+				})
+				j++
+			}
+		}
+		for i < mm {
+			edits = append(edits, diffEdit{
+				kind:    editDelete,
+				text:    oldMid[i],
+				oldLine: prefix + i + 1,
+			})
+			i++
+		}
+		for j < nm {
+			edits = append(edits, diffEdit{
+				kind:    editInsert,
+				text:    newMid[j],
+				newLine: prefix + j + 1,
 			})
 			j++
 		}
 	}
-	for i < m {
+
+	for k := 0; k < suffix; k++ {
+		oldIdx := m - suffix + k
+		newIdx := n - suffix + k
 		edits = append(edits, diffEdit{
-			kind:    editDelete,
-			text:    oldLines[i],
-			oldLine: i + 1,
+			kind:    editEqual,
+			text:    oldLines[oldIdx],
+			oldLine: oldIdx + 1,
+			newLine: newIdx + 1,
 		})
-		i++
-	}
-	for j < n {
-		edits = append(edits, diffEdit{
-			kind:    editInsert,
-			text:    newLines[j],
-			newLine: j + 1,
-		})
-		j++
 	}
 
 	return edits

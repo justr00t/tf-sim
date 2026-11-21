@@ -676,32 +676,90 @@ func FormatRemediationPatches(patches []model.RemediationPatch, format string) (
 
 	case FormatTable:
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("Remediation Patches: %d\n\n", len(patches)))
-		w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "FILE\tRESOURCE ADDRESS\tDIFF LINES")
-		for _, p := range patches {
-			diffLines := 0
-			trimmed := strings.TrimSpace(p.UnifiedDiff)
-			if trimmed != "" {
-				diffLines = len(strings.Split(trimmed, "\n"))
-			}
-			fmt.Fprintf(w, "%s\t%s\t%d\n", p.FilePath, p.ResourceAddress, diffLines)
-		}
-		w.Flush()
+		appendRemediationPatchesTable(&b, patches)
 		return b.String(), nil
 
 	case FormatMarkdown:
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("# Remediation Patches (%d)\n\n", len(patches)))
-		for i, p := range patches {
-			b.WriteString(fmt.Sprintf("### Patch %d: `%s`\n\n", i+1, p.ResourceAddress))
-			b.WriteString(fmt.Sprintf("- **File:** `%s`\n\n", p.FilePath))
-			b.WriteString("```diff\n")
-			b.WriteString(p.UnifiedDiff)
-			if !strings.HasSuffix(p.UnifiedDiff, "\n") {
-				b.WriteString("\n")
+		appendRemediationPatchesMarkdown(&b, patches)
+		return b.String(), nil
+
+	default:
+		return "", fmt.Errorf("unsupported output format %q: expected %q, %q, %q, or %q", format, FormatTable, FormatJSON, FormatMarkdown, FormatSARIF)
+	}
+}
+
+// FormatRemediationReport formats a full RemediationReport (patches, skipped diagnostics, and summary) across table, json, markdown, or sarif formats.
+func FormatRemediationReport(rep *model.RemediationReport, format string) (string, error) {
+	norm, err := normalizeFormat(format)
+	if err != nil {
+		return "", err
+	}
+
+	outRep := normalizeRemediationReport(rep)
+
+	switch norm {
+	case FormatJSON:
+		data, err := json.MarshalIndent(outRep, "", "  ")
+		if err != nil {
+			return "", fmt.Errorf("marshaling remediation report to JSON: %w", err)
+		}
+		return string(data), nil
+
+	case FormatSARIF:
+		return formatRemediationReportSARIF(&outRep)
+
+	case FormatTable:
+		if len(outRep.Patches) == 0 && len(outRep.Skipped) == 0 {
+			return "No remediation patches generated.", nil
+		}
+		var b strings.Builder
+		if len(outRep.Patches) > 0 {
+			appendRemediationPatchesTable(&b, outRep.Patches)
+		} else {
+			b.WriteString(fmt.Sprintf("No automated remediation patches generated (%d violation(s) require manual review).\n", len(outRep.Skipped)))
+		}
+		if len(outRep.Skipped) > 0 {
+			b.WriteString(fmt.Sprintf("\nSkipped / Manual-Review Violations: %d\n\n", len(outRep.Skipped)))
+			w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "RESOURCE ADDRESS\tRULE ID\tREASON\tDETAIL\tGUIDANCE")
+			for _, d := range outRep.Skipped {
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+					normalizeTableCell(d.ResourceAddress),
+					normalizeTableCell(d.RuleID),
+					normalizeTableCell(string(d.Reason)),
+					normalizeTableCell(d.Detail),
+					normalizeTableCell(d.Guidance),
+				)
 			}
-			b.WriteString("```\n\n")
+			w.Flush()
+		}
+		return b.String(), nil
+
+	case FormatMarkdown:
+		if len(outRep.Patches) == 0 && len(outRep.Skipped) == 0 {
+			return "No remediation patches generated.", nil
+		}
+		var b strings.Builder
+		if len(outRep.Patches) > 0 {
+			appendRemediationPatchesMarkdown(&b, outRep.Patches)
+		} else {
+			b.WriteString(fmt.Sprintf("# Remediation Patches (0)\n\nNo automated remediation patches generated (**%d** violation(s) require manual review).\n\n", len(outRep.Skipped)))
+		}
+		if len(outRep.Skipped) > 0 {
+			b.WriteString(fmt.Sprintf("## Skipped / Manual-Review Violations (%d)\n\n", len(outRep.Skipped)))
+			b.WriteString("| Resource | Rule | Severity | Reason | Detail | Guidance |\n")
+			b.WriteString("| --- | --- | --- | --- | --- | --- |\n")
+			for _, d := range outRep.Skipped {
+				b.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s |\n",
+					escapeMarkdownTableCell(d.ResourceAddress),
+					escapeMarkdownTableCell(d.RuleID),
+					escapeMarkdownTableCell(d.Severity),
+					escapeMarkdownTableCell(string(d.Reason)),
+					escapeMarkdownTableCell(d.Detail),
+					escapeMarkdownTableCell(d.Guidance),
+				))
+			}
 		}
 		return b.String(), nil
 
@@ -710,11 +768,163 @@ func FormatRemediationPatches(patches []model.RemediationPatch, format string) (
 	}
 }
 
+func normalizeRemediationReport(rep *model.RemediationReport) model.RemediationReport {
+	out := model.RemediationReport{
+		Patches: make([]model.RemediationPatch, 0),
+		Skipped: make([]model.RemediationDiagnostic, 0),
+		Summary: model.RemediationSummary{
+			ByReason: make(map[string]int),
+		},
+	}
+	if rep == nil {
+		return out
+	}
+	out.Summary.TotalViolations = rep.Summary.TotalViolations
+	out.Summary.PatchedCount = rep.Summary.PatchedCount
+	out.Summary.SkippedCount = rep.Summary.SkippedCount
+	if rep.Patches != nil {
+		out.Patches = rep.Patches
+	}
+	if rep.Skipped != nil {
+		out.Skipped = rep.Skipped
+	}
+	if rep.Summary.ByReason != nil {
+		out.Summary.ByReason = rep.Summary.ByReason
+	}
+	return out
+}
+
+func appendRemediationPatchesTable(b *strings.Builder, patches []model.RemediationPatch) {
+	b.WriteString(fmt.Sprintf("Remediation Patches: %d\n\n", len(patches)))
+	w := tabwriter.NewWriter(b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "FILE\tRESOURCE ADDRESS\tDIFF LINES")
+	for _, p := range patches {
+		diffLines := 0
+		trimmed := strings.TrimSpace(p.UnifiedDiff)
+		if trimmed != "" {
+			diffLines = len(strings.Split(trimmed, "\n"))
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d\n", p.FilePath, p.ResourceAddress, diffLines)
+	}
+	w.Flush()
+}
+
+func appendRemediationPatchesMarkdown(b *strings.Builder, patches []model.RemediationPatch) {
+	b.WriteString(fmt.Sprintf("# Remediation Patches (%d)\n\n", len(patches)))
+	for i, p := range patches {
+		fence := markdownBacktickFence(p.UnifiedDiff)
+		b.WriteString(fmt.Sprintf("### Patch %d: `%s`\n\n", i+1, p.ResourceAddress))
+		b.WriteString(fmt.Sprintf("- **File:** `%s`\n\n", p.FilePath))
+		b.WriteString(fence + "diff\n")
+		b.WriteString(p.UnifiedDiff)
+		if !strings.HasSuffix(p.UnifiedDiff, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString(fence + "\n\n")
+	}
+}
+
+func markdownBacktickFence(content string) string {
+	maxRun := 0
+	curRun := 0
+	for i := 0; i < len(content); i++ {
+		if content[i] == '`' {
+			curRun++
+			if curRun > maxRun {
+				maxRun = curRun
+			}
+		} else {
+			curRun = 0
+		}
+	}
+	fenceLen := 3
+	if maxRun >= fenceLen {
+		fenceLen = maxRun + 1
+	}
+	return strings.Repeat("`", fenceLen)
+}
+
+var tableCellReplacer = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ", "\t", " ")
+
+func normalizeTableCell(s string) string {
+	return strings.TrimSpace(tableCellReplacer.Replace(s))
+}
+
+var markdownTableCellReplacer = strings.NewReplacer(
+	"\r\n", " ",
+	"\r", " ",
+	"\n", " ",
+	"\t", " ",
+	"\\", `\\`,
+	"|", `\|`,
+	"`", "\\`",
+	"<", "&lt;",
+	">", "&gt;",
+)
+
+func escapeMarkdownTableCell(s string) string {
+	return strings.TrimSpace(markdownTableCellReplacer.Replace(s))
+}
+
 func formatRemediationSARIF(patches []model.RemediationPatch) (string, error) {
 	if len(patches) == 0 {
 		return newSARIFLog(nil, nil)
 	}
+	rules, results := buildRemediationPatchSARIFEntries(patches)
+	return newSARIFLog(rules, results)
+}
 
+func formatRemediationReportSARIF(rep *model.RemediationReport) (string, error) {
+	if rep == nil || (len(rep.Patches) == 0 && len(rep.Skipped) == 0) {
+		return newSARIFLog(nil, nil)
+	}
+
+	rules := make([]sarifReportingDescriptor, 0, 2)
+	results := make([]sarifResult, 0, len(rep.Patches)+len(rep.Skipped))
+
+	if len(rep.Patches) > 0 {
+		patchRules, patchResults := buildRemediationPatchSARIFEntries(rep.Patches)
+		rules = append(rules, patchRules...)
+		results = append(results, patchResults...)
+	}
+
+	if len(rep.Skipped) > 0 {
+		rules = append(rules, sarifReportingDescriptor{
+			ID:               "TFSIM-REMEDIATE-SKIPPED",
+			ShortDescription: &sarifMessage{Text: "Policy violation requires manual Terraform remediation"},
+		})
+		for _, d := range rep.Skipped {
+			uri := normalizeSARIFURI(d.FilePath)
+			if uri == "" {
+				uri = "main.tf"
+			}
+			loc := sarifLocation{
+				PhysicalLocation: &sarifPhysicalLocation{
+					ArtifactLocation: sarifArtifactLocation{URI: uri},
+					Region:           &sarifRegion{StartLine: 1},
+				},
+			}
+			if d.ResourceAddress != "" {
+				loc.LogicalLocations = []sarifLogicalLocation{
+					{
+						FullyQualifiedName: d.ResourceAddress,
+						Kind:               "resource",
+					},
+				}
+			}
+			results = append(results, sarifResult{
+				RuleID:    "TFSIM-REMEDIATE-SKIPPED",
+				Level:     "warning",
+				Message:   sarifMessage{Text: fmt.Sprintf("[%s] %s: %s Guidance: %s", d.Reason, d.RuleID, d.Detail, d.Guidance)},
+				Locations: []sarifLocation{loc},
+			})
+		}
+	}
+
+	return newSARIFLog(rules, results)
+}
+
+func buildRemediationPatchSARIFEntries(patches []model.RemediationPatch) ([]sarifReportingDescriptor, []sarifResult) {
 	rules := []sarifReportingDescriptor{
 		{
 			ID:               "TFSIM-REMEDIATE",
@@ -750,5 +960,5 @@ func formatRemediationSARIF(patches []model.RemediationPatch) (string, error) {
 		})
 	}
 
-	return newSARIFLog(rules, results)
+	return rules, results
 }

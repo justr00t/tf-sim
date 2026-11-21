@@ -134,6 +134,7 @@ VERIFY_RC="skipped"
 EVAL_RC="skipped"
 VIOLATIONS_COUNT="0"
 PATCHES_COUNT="0"
+SKIPPED_COUNT="0"
 HAS_SARIF="false"
 SARIF_FILE=""
 MARKDOWN_FILE="$(to_native_path "$OUT_DIR/comment.md")"
@@ -240,7 +241,7 @@ if [ -n "$PLAN_INPUT" ]; then
     fi
 
     set +e
-    "$TFSIM_CMD" remediate "${REM_ARGS[@]}" --format json > "$OUT_DIR/remediate.json" 2> "$OUT_DIR/remediate.err"
+    "$TFSIM_CMD" remediate "${REM_ARGS[@]}" --include-skipped --format json > "$OUT_DIR/remediate.json" 2> "$OUT_DIR/remediate.err"
     rc=$?
     set -e
     if [ "$rc" -ne 0 ]; then
@@ -248,13 +249,19 @@ if [ -n "$PLAN_INPUT" ]; then
       exit "$rc"
     fi
 
-    PATCHES_COUNT="$(node -e '
+    REM_COUNTS="$(node -e '
       const fs = require("fs");
       const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-      process.stdout.write(String(Array.isArray(d) ? d.length : 0));
+      const patches = Array.isArray(d) ? d : (d && Array.isArray(d.patches) ? d.patches : []);
+      const skipped = Array.isArray(d) ? [] : (d && Array.isArray(d.skipped) ? d.skipped : []);
+      process.stdout.write(`${patches.length}\n${skipped.length}`);
     ' "$(to_native_path "$OUT_DIR/remediate.json")")"
+    PATCHES_COUNT="$(printf '%s\n' "$REM_COUNTS" | sed -n '1p' | tr -d '\r')"
+    SKIPPED_COUNT="$(printf '%s\n' "$REM_COUNTS" | sed -n '2p' | tr -d '\r')"
+    if [ -z "$PATCHES_COUNT" ]; then PATCHES_COUNT="0"; fi
+    if [ -z "$SKIPPED_COUNT" ]; then SKIPPED_COUNT="0"; fi
 
-    if [ "$PATCHES_COUNT" -gt 0 ]; then
+    if [ "$PATCHES_COUNT" -gt 0 ] || [ "$SKIPPED_COUNT" -gt 0 ]; then
       set +e
       "$TFSIM_CMD" remediate "${REM_ARGS[@]}" --format markdown > "$OUT_DIR/remediate.md" 2> "$OUT_DIR/remediate.md.err"
       rc_md=$?
@@ -334,6 +341,7 @@ TFSIM_VERIFY_RC="$VERIFY_RC" \
 TFSIM_EVAL_RC="$EVAL_RC" \
 TFSIM_VIOLATIONS_COUNT="$VIOLATIONS_COUNT" \
 TFSIM_PATCHES_COUNT="$PATCHES_COUNT" \
+TFSIM_SKIPPED_COUNT="$SKIPPED_COUNT" \
 TFSIM_HAS_VIOLATION="$HAS_VIOLATION" \
 TFSIM_VERIFY_MD="$([ -f "$OUT_DIR/verify.md" ] && to_native_path "$OUT_DIR/verify.md" || printf '')" \
 TFSIM_EVAL_MD="$([ -f "$OUT_DIR/eval.md" ] && to_native_path "$OUT_DIR/eval.md" || printf '')" \
@@ -350,6 +358,7 @@ node -e '
   const evalRC = process.env.TFSIM_EVAL_RC;
   const violationsCount = Number(process.env.TFSIM_VIOLATIONS_COUNT || "0");
   const patchesCount = Number(process.env.TFSIM_PATCHES_COUNT || "0");
+  const skippedCount = Number(process.env.TFSIM_SKIPPED_COUNT || "0");
   const hasViolation = process.env.TFSIM_HAS_VIOLATION === "true";
 
   const verifyMdPath = process.env.TFSIM_VERIFY_MD;
@@ -366,6 +375,21 @@ node -e '
     const fence = "`".repeat(maxTicks + 1);
     const pad = clean.startsWith("`") || clean.endsWith("`") ? " " : "";
     return `${fence}${pad}${clean}${pad}${fence}`;
+  }
+
+  function escapeTableCell(text) {
+    return String(text || "")
+      .replace(/[\r\n]+/g, " ")
+      .replace(/\\/g, "\\\\")
+      .replace(/\|/g, "\\|")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\[/g, "\\[")
+      .replace(/\]/g, "\\]");
+  }
+
+  function escapeInlineCodeTableCell(text) {
+    return inlineCode(text).replace(/\\(?=\|)/g, "\\\\").replace(/\|/g, "\\|");
   }
 
   function safeTildeFence(text) {
@@ -397,6 +421,9 @@ node -e '
   parts.push(`| **Policy Verification (\`verify\`)** | ${verifyStatus} |`);
   parts.push(`| **Plan Violations (\`eval\`)** | ${evalRC === "skipped" ? "skipped" : violationsCount} |`);
   parts.push(`| **HCL Patches (\`remediate\`)** | ${patchesCount} |`);
+  if (skippedCount > 0) {
+    parts.push(`| **Manual Review (\`remediate\`)** | ${skippedCount} |`);
+  }
 
   if (verifyMdPath && fs.existsSync(verifyMdPath) && (verifyRC === "1" || evalRC === "skipped")) {
     const content = fs.readFileSync(verifyMdPath, "utf8").trim();
@@ -414,27 +441,32 @@ node -e '
     }
   }
 
+  let patches = [];
+  let skipped = [];
+  if (remediateJsonPath && fs.existsSync(remediateJsonPath)) {
+    const rawRem = JSON.parse(fs.readFileSync(remediateJsonPath, "utf8"));
+    patches = Array.isArray(rawRem) ? rawRem : (rawRem && Array.isArray(rawRem.patches) ? rawRem.patches : []);
+    skipped = Array.isArray(rawRem) ? [] : (rawRem && Array.isArray(rawRem.skipped) ? rawRem.skipped : []);
+  }
+
   if (patchesCount > 0) {
     let remBody = "";
-    if (remediateJsonPath && fs.existsSync(remediateJsonPath)) {
-      const patches = JSON.parse(fs.readFileSync(remediateJsonPath, "utf8"));
-      const hasJsonDiffs = Array.isArray(patches) && patches.some((p) => p && typeof p.unified_diff === "string" && p.unified_diff.length > 0);
-      if (hasJsonDiffs) {
-        const remParts = [`# Remediation Patches (${patches.length})`, ""];
-        patches.forEach((p, idx) => {
-          const diff = String(p.unified_diff || "");
-          const fence = safeTildeFence(diff);
-          remParts.push(`### Patch ${idx + 1}: ${inlineCode(p.resource_address || p.resource || "")}`);
-          remParts.push("");
-          remParts.push(`- **File:** ${inlineCode(p.file_path || p.file || "")}`);
-          remParts.push("");
-          remParts.push(`${fence}diff`);
-          remParts.push(diff.endsWith("\n") ? diff.slice(0, -1) : diff);
-          remParts.push(fence);
-          remParts.push("");
-        });
-        remBody = remParts.join("\n").trim();
-      }
+    const hasJsonDiffs = patches.some((p) => p && typeof p.unified_diff === "string" && p.unified_diff.length > 0);
+    if (hasJsonDiffs) {
+      const remParts = [`# Remediation Patches (${patches.length})`, ""];
+      patches.forEach((p, idx) => {
+        const diff = String(p.unified_diff || "");
+        const fence = safeTildeFence(diff);
+        remParts.push(`### Patch ${idx + 1}: ${inlineCode(p.resource_address || p.resource || "")}`);
+        remParts.push("");
+        remParts.push(`- **File:** ${inlineCode(p.file_path || p.file || "")}`);
+        remParts.push("");
+        remParts.push(`${fence}diff`);
+        remParts.push(diff.endsWith("\n") ? diff.slice(0, -1) : diff);
+        remParts.push(fence);
+        remParts.push("");
+      });
+      remBody = remParts.join("\n").trim();
     }
     if (!remBody && remediateMdPath && fs.existsSync(remediateMdPath)) {
       remBody = fs.readFileSync(remediateMdPath, "utf8").trim();
@@ -448,6 +480,28 @@ node -e '
       parts.push("");
       parts.push("</details>");
     }
+  }
+
+  if (skipped.length > 0) {
+    const diagParts = [
+      "| Resource | Rule | Reason | Detail | Guidance |",
+      "| --- | --- | --- | --- | --- |"
+    ];
+    for (const d of skipped) {
+      const resCell = escapeInlineCodeTableCell((d && (d.resource_address || d.resource)) || "");
+      const ruleCell = escapeInlineCodeTableCell((d && d.rule_id) || "");
+      const reasonCell = escapeInlineCodeTableCell((d && d.reason) || "");
+      const detailCell = escapeTableCell((d && d.detail) || "");
+      const guidanceCell = escapeTableCell((d && d.guidance) || "");
+      diagParts.push(`| ${resCell} | ${ruleCell} | ${reasonCell} | ${detailCell} | ${guidanceCell} |`);
+    }
+    parts.push("");
+    parts.push("<details>");
+    parts.push(`<summary>⚠️ <b>Manual Remediation Diagnostics (${skipped.length} skipped violation(s))</b> — click to expand</summary>`);
+    parts.push("");
+    parts.push(diagParts.join("\n"));
+    parts.push("");
+    parts.push("</details>");
   }
 
   const MAX_LIMIT = 60000;
@@ -528,6 +582,7 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
     printf 'exit-code=%s\n' "$FINAL_EXIT_CODE"
     printf 'violations-count=%s\n' "$VIOLATIONS_COUNT"
     printf 'patches-count=%s\n' "$PATCHES_COUNT"
+    printf 'skipped-count=%s\n' "$SKIPPED_COUNT"
     printf 'sarif-file=%s\n' "$SARIF_FILE"
     printf 'markdown-file=%s\n' "$MARKDOWN_FILE"
     printf 'comment-marker=%s\n' "$COMMENT_MARKER"

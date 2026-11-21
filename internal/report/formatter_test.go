@@ -1078,3 +1078,193 @@ func TestFormatRemediationPatches_SARIF_EmptyAndNil(t *testing.T) {
 		})
 	}
 }
+
+// TestFormatRemediationReport_AllFormats verifies table, json, markdown, and sarif output for RemediationReport.
+func TestFormatRemediationReport_AllFormats(t *testing.T) {
+	rep := &model.RemediationReport{
+		Patches: []model.RemediationPatch{
+			{
+				FilePath:        "main.tf",
+				ResourceAddress: "aws_ebs_volume.bad",
+				RuleID:          "aws-ebs-encrypt",
+				OriginalHCL:     "resource \"aws_ebs_volume\" \"bad\" {\n  encrypted = false\n}\n",
+				PatchedHCL:      "resource \"aws_ebs_volume\" \"bad\" {\n  encrypted = true\n}\n",
+				UnifiedDiff:     "--- a/main.tf\n+++ b/main.tf\n@@ -1,3 +1,3 @@\n resource \"aws_ebs_volume\" \"bad\" {\n-  encrypted = false\n+  encrypted = true\n }\n",
+			},
+		},
+		Skipped: []model.RemediationDiagnostic{
+			{
+				RuleID:          "aws-s3-pab-acls",
+				Severity:        "HIGH",
+				ResourceAddress: "module.ext.aws_s3_bucket_public_access_block.this",
+				Reason:          model.SkipReasonExternalModuleSource,
+				FilePath:        `modules\wrapper\main.tf`,
+				ModuleSource:    "terraform-aws-modules/s3-bucket/aws",
+				Detail:          "Module source is external registry module.",
+				Guidance:        "Update module inputs in main.tf manually.",
+			},
+		},
+		Summary: model.RemediationSummary{
+			TotalViolations: 2,
+			PatchedCount:    1,
+			SkippedCount:    1,
+			ByReason: map[string]int{
+				string(model.SkipReasonExternalModuleSource): 1,
+			},
+		},
+	}
+
+	t.Run("Table", func(t *testing.T) {
+		out, err := report.FormatRemediationReport(rep, report.FormatTable)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, want := range []string{
+			"Remediation Patches: 1",
+			"aws_ebs_volume.bad",
+			"Skipped / Manual-Review Violations: 1",
+			"module.ext.aws_s3_bucket_public_access_block.this",
+			"external_module_source",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("table output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("JSON", func(t *testing.T) {
+		out, err := report.FormatRemediationReport(rep, report.FormatJSON)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var parsed model.RemediationReport
+		if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+			t.Fatalf("failed to unmarshal JSON: %v\n%s", err, out)
+		}
+		if len(parsed.Patches) != 1 || len(parsed.Skipped) != 1 {
+			t.Fatalf("unexpected counts: patches=%d skipped=%d", len(parsed.Patches), len(parsed.Skipped))
+		}
+		if parsed.Summary.TotalViolations != 2 || parsed.Summary.PatchedCount != 1 || parsed.Summary.SkippedCount != 1 {
+			t.Errorf("unexpected summary: %+v", parsed.Summary)
+		}
+	})
+
+	t.Run("Markdown", func(t *testing.T) {
+		out, err := report.FormatRemediationReport(rep, report.FormatMarkdown)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, want := range []string{
+			"# Remediation Patches (1)",
+			"```diff",
+			"## Skipped / Manual-Review Violations (1)",
+			"| Resource | Rule | Severity | Reason | Detail | Guidance |",
+			"module.ext.aws_s3_bucket_public_access_block.this",
+			"external_module_source",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("markdown output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("SARIF", func(t *testing.T) {
+		out, err := report.FormatRemediationReport(rep, report.FormatSARIF)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var sarif testSARIFLog
+		if err := json.Unmarshal([]byte(out), &sarif); err != nil {
+			t.Fatalf("failed to unmarshal SARIF: %v\n%s", err, out)
+		}
+		if len(sarif.Runs) != 1 || len(sarif.Runs[0].Results) != 2 {
+			t.Fatalf("expected 1 run with 2 results, got %+v", sarif.Runs)
+		}
+		r0, r1 := sarif.Runs[0].Results[0], sarif.Runs[0].Results[1]
+		if r0.RuleID != "TFSIM-REMEDIATE" || r0.Level != "note" {
+			t.Errorf("unexpected patch SARIF result: %+v", r0)
+		}
+		if r1.RuleID != "TFSIM-REMEDIATE-SKIPPED" || r1.Level != "warning" {
+			t.Errorf("unexpected skipped SARIF result: %+v", r1)
+		}
+		if r1.Locations[0].PhysicalLocation.ArtifactLocation.URI != "modules/wrapper/main.tf" {
+			t.Errorf("expected normalized forward-slash URI, got %q", r1.Locations[0].PhysicalLocation.ArtifactLocation.URI)
+		}
+	})
+
+	t.Run("NilAndSkippedOnlyAndInvalidFormat", func(t *testing.T) {
+		jsonEmpty, err := report.FormatRemediationReport(nil, report.FormatJSON)
+		if err != nil {
+			t.Fatalf("nil JSON failed: %v", err)
+		}
+		if !strings.Contains(jsonEmpty, `"patches": []`) || !strings.Contains(jsonEmpty, `"skipped": []`) {
+			t.Errorf("expected non-nil empty arrays in JSON for nil report, got:\n%s", jsonEmpty)
+		}
+
+		skippedOnly := &model.RemediationReport{
+			Skipped: rep.Skipped,
+			Summary: model.RemediationSummary{TotalViolations: 1, SkippedCount: 1},
+		}
+		mdSkippedOnly, err := report.FormatRemediationReport(skippedOnly, report.FormatMarkdown)
+		if err != nil {
+			t.Fatalf("skipped-only markdown failed: %v", err)
+		}
+		if !strings.Contains(mdSkippedOnly, "# Remediation Patches (0)") || !strings.Contains(mdSkippedOnly, "## Skipped / Manual-Review Violations (1)") {
+			t.Errorf("unexpected skipped-only markdown:\n%s", mdSkippedOnly)
+		}
+
+		if _, err := report.FormatRemediationReport(rep, "yaml"); err == nil {
+			t.Error("expected error for unsupported format 'yaml'")
+		}
+	})
+}
+
+// TestFormatRemediationReport_MarkdownPipeAndBacktickInjection verifies GFM table cells escape pipes and newlines.
+func TestFormatRemediationReport_MarkdownPipeAndBacktickInjection(t *testing.T) {
+	rep := &model.RemediationReport{
+		Skipped: []model.RemediationDiagnostic{
+			{
+				RuleID:          "aws-s3-sse-kms",
+				Severity:        "HIGH",
+				ResourceAddress: `aws_s3_bucket.bad["a|b"]`,
+				Reason:          model.SkipReasonUnsupportedExpression,
+				Detail:          "Value uses | pipe\nand newline `var.kms` </details><script>",
+				Guidance:        "Fix `var.kms` |\r\nin variables.tf > 0",
+			},
+		},
+		Summary: model.RemediationSummary{TotalViolations: 1, SkippedCount: 1},
+	}
+
+	out, err := report.FormatRemediationReport(rep, report.FormatMarkdown)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var dataRow string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "aws-s3-sse-kms") {
+			dataRow = line
+			break
+		}
+	}
+	if dataRow == "" {
+		t.Fatalf("could not find data row in markdown output:\n%s", out)
+	}
+	if !strings.Contains(dataRow, `\|`) {
+		t.Errorf("expected escaped pipe '\\|' in markdown row, got: %s", dataRow)
+	}
+	if strings.Contains(dataRow, "</details>") || strings.Contains(dataRow, "<script>") {
+		t.Errorf("expected raw HTML tags to be escaped in markdown row, got: %s", dataRow)
+	}
+	if !strings.Contains(dataRow, "&lt;/details&gt;") || !strings.Contains(dataRow, "&gt;") {
+		t.Errorf("expected &lt; and &gt; escaping in markdown row, got: %s", dataRow)
+	}
+	if strings.Contains(dataRow, "\r") {
+		t.Errorf("expected no CR in markdown row, got: %q", dataRow)
+	}
+	// Unescaped pipe count for a 6-column GFM table row must be 7 (leading + 5 separators + trailing).
+	unescapedPipes := strings.Count(strings.ReplaceAll(dataRow, `\|`, ""), "|")
+	if unescapedPipes != 7 {
+		t.Errorf("expected 7 unescaped pipes (6 columns) in GFM row, got %d in: %s", unescapedPipes, dataRow)
+	}
+}
