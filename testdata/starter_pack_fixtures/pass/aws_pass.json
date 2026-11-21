@@ -1,0 +1,285 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket_public_access_block.compliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket_public_access_block",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "compliant-pab-bucket",
+          "block_public_acls": true,
+          "block_public_policy": true,
+          "ignore_public_acls": true,
+          "restrict_public_buckets": true
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_server_side_encryption_configuration.compliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket_server_side_encryption_configuration",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "compliant-sse-bucket",
+          "rule": [
+            {
+              "apply_server_side_encryption_by_default": [
+                {
+                  "kms_master_key_id": "arn:aws:kms:us-east-1:111122223333:key/compliant",
+                  "sse_algorithm": "aws:kms"
+                }
+              ]
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_versioning.compliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket_versioning",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "bucket": "compliant-versioned-bucket",
+          "versioning_configuration": [
+            {
+              "status": "Enabled"
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_db_instance.compliant",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "identifier": "compliant-prod-db",
+          "storage_encrypted": true,
+          "publicly_accessible": false,
+          "iam_database_authentication_enabled": true
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_ebs_volume.compliant",
+      "mode": "managed",
+      "type": "aws_ebs_volume",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "availability_zone": "us-east-1a",
+          "size": 50,
+          "encrypted": true
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_instance.compliant",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "ami": "ami-0123456789abcdef0",
+          "instance_type": "t3.medium",
+          "ebs_optimized": true
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_kms_key.compliant",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "description": "Compliant KMS key",
+          "enable_key_rotation": true
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_public_access_block.deleted_noncompliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket_public_access_block",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "bucket": "legacy-bucket",
+          "block_public_acls": false,
+          "block_public_policy": false,
+          "ignore_public_acls": false,
+          "restrict_public_buckets": false
+        },
+        "after": null,
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_server_side_encryption_configuration.deleted_noncompliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket_server_side_encryption_configuration",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "bucket": "legacy-bucket",
+          "rule": []
+        },
+        "after": {
+          "bucket": "legacy-bucket",
+          "rule": []
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_s3_bucket_versioning.deleted_noncompliant",
+      "mode": "managed",
+      "type": "aws_s3_bucket_versioning",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "bucket": "legacy-bucket",
+          "versioning_configuration": [
+            {
+              "status": "Disabled"
+            }
+          ]
+        },
+        "after": {
+          "bucket": "legacy-bucket",
+          "versioning_configuration": [
+            {
+              "status": "Disabled"
+            }
+          ]
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_db_instance.deleted_noncompliant",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "identifier": "legacy-db",
+          "storage_encrypted": false,
+          "publicly_accessible": true,
+          "iam_database_authentication_enabled": false
+        },
+        "after": {
+          "identifier": "legacy-db",
+          "storage_encrypted": false,
+          "publicly_accessible": true,
+          "iam_database_authentication_enabled": false
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_ebs_volume.deleted_noncompliant",
+      "mode": "managed",
+      "type": "aws_ebs_volume",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "availability_zone": "us-east-1a",
+          "encrypted": false
+        },
+        "after": null,
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_instance.deleted_noncompliant",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "ami": "ami-0123456789abcdef0",
+          "ebs_optimized": false
+        },
+        "after": {
+          "ami": "ami-0123456789abcdef0",
+          "ebs_optimized": false
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_kms_key.deleted_noncompliant",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "description": "legacy key",
+          "enable_key_rotation": false
+        },
+        "after": null,
+        "after_unknown": {}
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {}
+  }
+}

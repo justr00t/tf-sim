@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,11 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 
 	"github.com/justr00t/tf-sim/internal/backtest"
 	"github.com/justr00t/tf-sim/internal/engine"
 	"github.com/justr00t/tf-sim/internal/model"
 	"github.com/justr00t/tf-sim/internal/parser"
+	"github.com/justr00t/tf-sim/internal/policy"
 	"github.com/justr00t/tf-sim/internal/remediate"
 	"github.com/justr00t/tf-sim/internal/report"
 	"github.com/justr00t/tf-sim/internal/server"
@@ -62,7 +65,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return ExitOK
 }
 
-// NewRootCmd constructs the root cobra.Command for tf-sim with verify, eval, backtest, remediate, and serve subcommands.
+// NewRootCmd constructs the root cobra.Command for tf-sim with verify, eval, backtest, remediate, packs, and serve subcommands.
 func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:           "tf-sim",
@@ -82,6 +85,7 @@ func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newEvalCmd(stdout, stderr),
 		newBacktestCmd(stdout, stderr),
 		newRemediateCmd(stdout, stderr),
+		newPacksCmd(stdout, stderr),
 		newServeCmd(stdout, stderr),
 	)
 
@@ -91,6 +95,7 @@ func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
 		policyPaths  []string
+		packNames    []string
 		schemaPath   string
 		passFixtures []string
 		failFixtures []string
@@ -103,14 +108,9 @@ func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			cleanedPaths := make([]string, 0, len(policyPaths))
-			for _, p := range policyPaths {
-				if trimmed := strings.TrimSpace(p); trimmed != "" {
-					cleanedPaths = append(cleanedPaths, trimmed)
-				}
-			}
-			if len(cleanedPaths) == 0 {
-				return fmt.Errorf("--policy is required")
+			loadedPolicies, err := policy.LoadPolicies(policyPaths, packNames)
+			if err != nil {
+				return fmt.Errorf("loading policies: %w", err)
 			}
 
 			var schemas model.ProviderSchemaMap
@@ -124,7 +124,7 @@ func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 
 			v := verifier.NewVerifier()
-			res, err := v.VerifyPoliciesWithFixtures(ctx, cleanedPaths, schemas, passFixtures, failFixtures)
+			res, err := v.VerifyPoliciesContentsWithFixtures(ctx, loadedPolicies, schemas, passFixtures, failFixtures)
 			if err != nil {
 				return fmt.Errorf("verifying policy: %w", err)
 			}
@@ -142,12 +142,12 @@ func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego)")
+	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego) or directory(ies)")
+	cmd.Flags().StringSliceVar(&packNames, "pack", nil, "Bundled starter policy pack(s) to include (aws, azure, gcp, all)")
 	cmd.Flags().StringVar(&schemaPath, "schema", "", "Path to the Terraform provider schema JSON file")
 	cmd.Flags().StringSliceVar(&passFixtures, "pass-fixtures", nil, "Path(s) to compliant Terraform plan JSON file(s) or directory that must pass policy evaluation (0 violations)")
 	cmd.Flags().StringSliceVar(&failFixtures, "fail-fixtures", nil, "Path(s) to non-compliant Terraform plan JSON file(s) or directory that must trigger policy violations (>= 1 violation)")
 	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json|markdown|sarif)")
-	_ = cmd.MarkFlagRequired("policy")
 
 	return cmd
 }
@@ -155,6 +155,7 @@ func newVerifyCmd(stdout, stderr io.Writer) *cobra.Command {
 func newEvalCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
 		policyPaths []string
+		packNames   []string
 		planPath    string
 		repoName    string
 		format      string
@@ -166,8 +167,9 @@ func newEvalCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			if len(policyPaths) == 0 {
-				return fmt.Errorf("--policy is required")
+			loadedPolicies, err := policy.LoadPolicies(policyPaths, packNames)
+			if err != nil {
+				return fmt.Errorf("loading policies: %w", err)
 			}
 			if strings.TrimSpace(planPath) == "" {
 				return fmt.Errorf("--plan is required")
@@ -186,7 +188,7 @@ func newEvalCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 
 			ev := engine.NewEvaluator()
-			res, err := ev.EvaluatePlan(ctx, policyPaths, snapshot)
+			res, err := ev.EvaluatePlanContents(ctx, loadedPolicies, snapshot)
 			if err != nil {
 				return fmt.Errorf("evaluating plan: %w", err)
 			}
@@ -204,11 +206,11 @@ func newEvalCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego)")
+	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego) or directory(ies)")
+	cmd.Flags().StringSliceVar(&packNames, "pack", nil, "Bundled starter policy pack(s) to include (aws, azure, gcp, all)")
 	cmd.Flags().StringVar(&planPath, "plan", "", "Path to Terraform plan JSON file")
 	cmd.Flags().StringVar(&repoName, "repo", "", "Repository name for reporting (defaults to plan filename stem)")
 	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json|markdown|sarif)")
-	_ = cmd.MarkFlagRequired("policy")
 	_ = cmd.MarkFlagRequired("plan")
 
 	return cmd
@@ -217,6 +219,7 @@ func newEvalCmd(stdout, stderr io.Writer) *cobra.Command {
 func newBacktestCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
 		policyPaths []string
+		packNames   []string
 		plansDir    string
 		concurrency int
 		format      string
@@ -228,8 +231,9 @@ func newBacktestCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			if len(policyPaths) == 0 {
-				return fmt.Errorf("--policy is required")
+			loadedPolicies, err := policy.LoadPolicies(policyPaths, packNames)
+			if err != nil {
+				return fmt.Errorf("loading policies: %w", err)
 			}
 			if strings.TrimSpace(plansDir) == "" {
 				return fmt.Errorf("--plans-dir is required")
@@ -246,7 +250,7 @@ func newBacktestCmd(stdout, stderr io.Writer) *cobra.Command {
 				return fmt.Errorf("loading plan snapshots: %w", err)
 			}
 
-			rep, err := runner.RunBacktest(ctx, policyPaths, snapshots)
+			rep, err := runner.RunBacktestContents(ctx, loadedPolicies, snapshots)
 			if err != nil {
 				return fmt.Errorf("running backtest: %w", err)
 			}
@@ -264,11 +268,11 @@ func newBacktestCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego)")
+	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego) or directory(ies)")
+	cmd.Flags().StringSliceVar(&packNames, "pack", nil, "Bundled starter policy pack(s) to include (aws, azure, gcp, all)")
 	cmd.Flags().StringVar(&plansDir, "plans-dir", "", "Directory containing historical Terraform plan JSON files")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 0, "Worker pool concurrency (defaults to runtime.NumCPU())")
 	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json|markdown|sarif)")
-	_ = cmd.MarkFlagRequired("policy")
 	_ = cmd.MarkFlagRequired("plans-dir")
 
 	return cmd
@@ -277,6 +281,7 @@ func newBacktestCmd(stdout, stderr io.Writer) *cobra.Command {
 func newRemediateCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
 		policyPaths []string
+		packNames   []string
 		planPath    string
 		tfDir       string
 		repoName    string
@@ -290,8 +295,9 @@ func newRemediateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			if len(policyPaths) == 0 {
-				return fmt.Errorf("--policy is required")
+			loadedPolicies, err := policy.LoadPolicies(policyPaths, packNames)
+			if err != nil {
+				return fmt.Errorf("loading policies: %w", err)
 			}
 			if strings.TrimSpace(planPath) == "" {
 				return fmt.Errorf("--plan is required")
@@ -313,7 +319,7 @@ func newRemediateCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 
 			ev := engine.NewEvaluator()
-			evalRes, err := ev.EvaluatePlan(ctx, policyPaths, snapshot)
+			evalRes, err := ev.EvaluatePlanContents(ctx, loadedPolicies, snapshot)
 			if err != nil {
 				return fmt.Errorf("evaluating plan: %w", err)
 			}
@@ -334,15 +340,57 @@ func newRemediateCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego)")
+	cmd.Flags().StringSliceVar(&policyPaths, "policy", nil, "Path(s) to Rego policy file(s) (.rego) or directory(ies)")
+	cmd.Flags().StringSliceVar(&packNames, "pack", nil, "Bundled starter policy pack(s) to include (aws, azure, gcp, all)")
 	cmd.Flags().StringVar(&planPath, "plan", "", "Path to Terraform plan JSON file")
 	cmd.Flags().StringVar(&tfDir, "tf-dir", "", "Directory containing Terraform (.tf) source files")
 	cmd.Flags().StringVar(&repoName, "repo", "", "Repository name for reporting (defaults to plan filename stem)")
 	cmd.Flags().BoolVar(&writeFlag, "write", false, "Write patched HCL changes back to .tf files in-place")
 	cmd.Flags().StringVar(&format, "format", report.FormatMarkdown, "Output format (table|json|markdown|sarif)")
-	_ = cmd.MarkFlagRequired("policy")
 	_ = cmd.MarkFlagRequired("plan")
 	_ = cmd.MarkFlagRequired("tf-dir")
+
+	return cmd
+}
+
+func newPacksCmd(stdout, _ io.Writer) *cobra.Command {
+	var format string
+
+	cmd := &cobra.Command{
+		Use:   "packs",
+		Short: "List bundled multi-cloud starter policy packs",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			packs := policy.ListPacks()
+			norm := strings.ToLower(strings.TrimSpace(format))
+
+			switch norm {
+			case report.FormatJSON:
+				data, err := json.MarshalIndent(packs, "", "  ")
+				if err != nil {
+					return fmt.Errorf("marshaling policy packs to JSON: %w", err)
+				}
+				writeOutput(stdout, string(data))
+				return nil
+
+			case report.FormatTable:
+				var b strings.Builder
+				w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(w, "PACK\tPROVIDER\tFILES\tRULES\tDESCRIPTION")
+				for _, pk := range packs {
+					fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%s\n", pk.Name, pk.Provider, pk.FileCount, pk.RuleCount, pk.Description)
+				}
+				w.Flush()
+				writeOutput(stdout, b.String())
+				return nil
+
+			default:
+				return fmt.Errorf("unsupported output format %q: expected %q or %q", format, report.FormatTable, report.FormatJSON)
+			}
+		},
+	}
+
+	cmd.Flags().StringVar(&format, "format", report.FormatTable, "Output format (table|json)")
 
 	return cmd
 }

@@ -1,0 +1,1001 @@
+{
+  "format_version": "1.0",
+  "provider_schemas": {
+    "registry.terraform.io/hashicorp/aws": {
+      "resource_schemas": {
+        "aws_s3_bucket_public_access_block": {
+          "version": 0,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "bucket": {
+                "type": "string",
+                "required": true
+              },
+              "block_public_acls": {
+                "type": "bool",
+                "optional": true
+              },
+              "block_public_policy": {
+                "type": "bool",
+                "optional": true
+              },
+              "ignore_public_acls": {
+                "type": "bool",
+                "optional": true
+              },
+              "restrict_public_buckets": {
+                "type": "bool",
+                "optional": true
+              }
+            }
+          }
+        },
+        "aws_s3_bucket_server_side_encryption_configuration": {
+          "version": 0,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "bucket": {
+                "type": "string",
+                "required": true
+              },
+              "expected_bucket_owner": {
+                "type": "string",
+                "optional": true
+              }
+            },
+            "block_types": {
+              "rule": {
+                "nesting_mode": "set",
+                "min_items": 1,
+                "block": {
+                  "attributes": {
+                    "bucket_key_enabled": {
+                      "type": "bool",
+                      "optional": true
+                    }
+                  },
+                  "block_types": {
+                    "apply_server_side_encryption_by_default": {
+                      "nesting_mode": "list",
+                      "max_items": 1,
+                      "block": {
+                        "attributes": {
+                          "kms_master_key_id": {
+                            "type": "string",
+                            "optional": true
+                          },
+                          "sse_algorithm": {
+                            "type": "string",
+                            "required": true
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "aws_s3_bucket_versioning": {
+          "version": 0,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "bucket": {
+                "type": "string",
+                "required": true
+              },
+              "expected_bucket_owner": {
+                "type": "string",
+                "optional": true
+              },
+              "mfa": {
+                "type": "string",
+                "optional": true
+              }
+            },
+            "block_types": {
+              "versioning_configuration": {
+                "nesting_mode": "list",
+                "min_items": 1,
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "mfa_delete": {
+                      "type": "string",
+                      "optional": true,
+                      "computed": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "required": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "aws_db_instance": {
+          "version": 2,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "arn": {
+                "type": "string",
+                "computed": true
+              },
+              "identifier": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "engine": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "engine_version": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "instance_class": {
+                "type": "string",
+                "required": true
+              },
+              "allocated_storage": {
+                "type": "number",
+                "optional": true,
+                "computed": true
+              },
+              "storage_encrypted": {
+                "type": "bool",
+                "optional": true
+              },
+              "kms_key_id": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "publicly_accessible": {
+                "type": "bool",
+                "optional": true
+              },
+              "iam_database_authentication_enabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "multi_az": {
+                "type": "bool",
+                "optional": true,
+                "computed": true
+              },
+              "backup_retention_period": {
+                "type": "number",
+                "optional": true,
+                "computed": true
+              },
+              "deletion_protection": {
+                "type": "bool",
+                "optional": true
+              },
+              "tags": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            }
+          }
+        },
+        "aws_ebs_volume": {
+          "version": 0,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "arn": {
+                "type": "string",
+                "computed": true
+              },
+              "availability_zone": {
+                "type": "string",
+                "required": true
+              },
+              "size": {
+                "type": "number",
+                "optional": true,
+                "computed": true
+              },
+              "type": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "encrypted": {
+                "type": "bool",
+                "optional": true,
+                "computed": true
+              },
+              "kms_key_id": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "iops": {
+                "type": "number",
+                "optional": true,
+                "computed": true
+              },
+              "tags": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            }
+          }
+        },
+        "aws_instance": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "arn": {
+                "type": "string",
+                "computed": true
+              },
+              "ami": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "instance_type": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "ebs_optimized": {
+                "type": "bool",
+                "optional": true,
+                "computed": true
+              },
+              "monitoring": {
+                "type": "bool",
+                "optional": true,
+                "computed": true
+              },
+              "associate_public_ip_address": {
+                "type": "bool",
+                "optional": true,
+                "computed": true
+              },
+              "subnet_id": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "tags": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            },
+            "block_types": {
+              "metadata_options": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "http_endpoint": {
+                      "type": "string",
+                      "optional": true,
+                      "computed": true
+                    },
+                    "http_tokens": {
+                      "type": "string",
+                      "optional": true,
+                      "computed": true
+                    }
+                  }
+                }
+              },
+              "root_block_device": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "encrypted": {
+                      "type": "bool",
+                      "optional": true,
+                      "computed": true
+                    },
+                    "volume_size": {
+                      "type": "number",
+                      "optional": true,
+                      "computed": true
+                    },
+                    "volume_type": {
+                      "type": "string",
+                      "optional": true,
+                      "computed": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "aws_kms_key": {
+          "version": 0,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "arn": {
+                "type": "string",
+                "computed": true
+              },
+              "key_id": {
+                "type": "string",
+                "computed": true
+              },
+              "description": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "deletion_window_in_days": {
+                "type": "number",
+                "optional": true
+              },
+              "enable_key_rotation": {
+                "type": "bool",
+                "optional": true
+              },
+              "rotation_period_in_days": {
+                "type": "number",
+                "optional": true,
+                "computed": true
+              },
+              "is_enabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "key_usage": {
+                "type": "string",
+                "optional": true
+              },
+              "tags": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "registry.terraform.io/hashicorp/azurerm": {
+      "resource_schemas": {
+        "azurerm_storage_account": {
+          "version": 4,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "name": {
+                "type": "string",
+                "required": true
+              },
+              "resource_group_name": {
+                "type": "string",
+                "required": true
+              },
+              "location": {
+                "type": "string",
+                "required": true
+              },
+              "account_tier": {
+                "type": "string",
+                "required": true
+              },
+              "account_replication_type": {
+                "type": "string",
+                "required": true
+              },
+              "https_traffic_only_enabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "min_tls_version": {
+                "type": "string",
+                "optional": true
+              },
+              "allow_nested_items_to_be_public": {
+                "type": "bool",
+                "optional": true
+              },
+              "public_network_access_enabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "tags": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            },
+            "block_types": {
+              "network_rules": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "bypass": {
+                      "type": [
+                        "set",
+                        "string"
+                      ],
+                      "optional": true,
+                      "computed": true
+                    },
+                    "default_action": {
+                      "type": "string",
+                      "required": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "azurerm_mssql_server": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "name": {
+                "type": "string",
+                "required": true
+              },
+              "resource_group_name": {
+                "type": "string",
+                "required": true
+              },
+              "location": {
+                "type": "string",
+                "required": true
+              },
+              "version": {
+                "type": "string",
+                "required": true
+              },
+              "administrator_login": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "administrator_login_password": {
+                "type": "string",
+                "optional": true
+              },
+              "minimum_tls_version": {
+                "type": "string",
+                "optional": true
+              },
+              "public_network_access_enabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "tags": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            }
+          }
+        },
+        "azurerm_postgresql_flexible_server": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "name": {
+                "type": "string",
+                "required": true
+              },
+              "resource_group_name": {
+                "type": "string",
+                "required": true
+              },
+              "location": {
+                "type": "string",
+                "required": true
+              },
+              "version": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "sku_name": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "storage_mb": {
+                "type": "number",
+                "optional": true,
+                "computed": true
+              },
+              "public_network_access_enabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "backup_retention_days": {
+                "type": "number",
+                "optional": true,
+                "computed": true
+              },
+              "geo_redundant_backup_enabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "tags": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            }
+          }
+        },
+        "azurerm_key_vault": {
+          "version": 2,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "name": {
+                "type": "string",
+                "required": true
+              },
+              "resource_group_name": {
+                "type": "string",
+                "required": true
+              },
+              "location": {
+                "type": "string",
+                "required": true
+              },
+              "tenant_id": {
+                "type": "string",
+                "required": true
+              },
+              "sku_name": {
+                "type": "string",
+                "required": true
+              },
+              "soft_delete_retention_days": {
+                "type": "number",
+                "optional": true
+              },
+              "purge_protection_enabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "enable_rbac_authorization": {
+                "type": "bool",
+                "optional": true
+              },
+              "public_network_access_enabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "tags": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "registry.terraform.io/hashicorp/google": {
+      "resource_schemas": {
+        "google_storage_bucket": {
+          "version": 3,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "name": {
+                "type": "string",
+                "required": true
+              },
+              "location": {
+                "type": "string",
+                "required": true
+              },
+              "project": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "storage_class": {
+                "type": "string",
+                "optional": true
+              },
+              "uniform_bucket_level_access": {
+                "type": "bool",
+                "optional": true,
+                "computed": true
+              },
+              "public_access_prevention": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "force_destroy": {
+                "type": "bool",
+                "optional": true
+              },
+              "labels": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            },
+            "block_types": {
+              "encryption": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "default_kms_key_name": {
+                      "type": "string",
+                      "required": true
+                    }
+                  }
+                }
+              },
+              "versioning": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "enabled": {
+                      "type": "bool",
+                      "required": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "google_sql_database_instance": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "name": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "project": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "region": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "database_version": {
+                "type": "string",
+                "required": true
+              },
+              "deletion_protection": {
+                "type": "bool",
+                "optional": true
+              }
+            },
+            "block_types": {
+              "settings": {
+                "nesting_mode": "list",
+                "min_items": 1,
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "tier": {
+                      "type": "string",
+                      "required": true
+                    },
+                    "availability_type": {
+                      "type": "string",
+                      "optional": true
+                    },
+                    "disk_type": {
+                      "type": "string",
+                      "optional": true
+                    },
+                    "disk_size": {
+                      "type": "number",
+                      "optional": true,
+                      "computed": true
+                    }
+                  },
+                  "block_types": {
+                    "ip_configuration": {
+                      "nesting_mode": "list",
+                      "max_items": 1,
+                      "block": {
+                        "attributes": {
+                          "ipv4_enabled": {
+                            "type": "bool",
+                            "optional": true
+                          },
+                          "private_network": {
+                            "type": "string",
+                            "optional": true
+                          },
+                          "ssl_mode": {
+                            "type": "string",
+                            "optional": true,
+                            "computed": true
+                          }
+                        }
+                      }
+                    },
+                    "backup_configuration": {
+                      "nesting_mode": "list",
+                      "max_items": 1,
+                      "block": {
+                        "attributes": {
+                          "enabled": {
+                            "type": "bool",
+                            "optional": true
+                          },
+                          "point_in_time_recovery_enabled": {
+                            "type": "bool",
+                            "optional": true
+                          },
+                          "start_time": {
+                            "type": "string",
+                            "optional": true,
+                            "computed": true
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "google_compute_instance": {
+          "version": 6,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "name": {
+                "type": "string",
+                "required": true
+              },
+              "machine_type": {
+                "type": "string",
+                "required": true
+              },
+              "zone": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "project": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "can_ip_forward": {
+                "type": "bool",
+                "optional": true
+              },
+              "deletion_protection": {
+                "type": "bool",
+                "optional": true
+              },
+              "labels": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            },
+            "block_types": {
+              "shielded_instance_config": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "enable_secure_boot": {
+                      "type": "bool",
+                      "optional": true
+                    },
+                    "enable_vtpm": {
+                      "type": "bool",
+                      "optional": true
+                    },
+                    "enable_integrity_monitoring": {
+                      "type": "bool",
+                      "optional": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "google_kms_crypto_key": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "name": {
+                "type": "string",
+                "required": true
+              },
+              "key_ring": {
+                "type": "string",
+                "required": true
+              },
+              "purpose": {
+                "type": "string",
+                "optional": true
+              },
+              "rotation_period": {
+                "type": "string",
+                "optional": true
+              },
+              "destroy_scheduled_duration": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "labels": {
+                "type": [
+                  "map",
+                  "string"
+                ],
+                "optional": true
+              }
+            }
+          }
+        },
+        "google_compute_firewall": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": {
+                "type": "string",
+                "computed": true
+              },
+              "name": {
+                "type": "string",
+                "required": true
+              },
+              "network": {
+                "type": "string",
+                "required": true
+              },
+              "project": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "direction": {
+                "type": "string",
+                "optional": true,
+                "computed": true
+              },
+              "priority": {
+                "type": "number",
+                "optional": true
+              },
+              "disabled": {
+                "type": "bool",
+                "optional": true
+              },
+              "source_ranges": {
+                "type": [
+                  "set",
+                  "string"
+                ],
+                "optional": true,
+                "computed": true
+              }
+            },
+            "block_types": {
+              "log_config": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "metadata": {
+                      "type": "string",
+                      "required": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

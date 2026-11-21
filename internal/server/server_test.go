@@ -35,6 +35,12 @@ func resolveTestWorkspaceRoot(t *testing.T) string {
 	return ""
 }
 
+func newJSONRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
 // newTestServer creates a Server pointed at the repository root workspace with AllowWrite disabled.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -286,7 +292,7 @@ func TestServer_PostVerify_ValidAndBrokenFailOpen(t *testing.T) {
 		body, _ := json.Marshal(VerifyRequest{
 			PolicyPath: "testdata/policies/storage_encryption.rego",
 		})
-		req := httptest.NewRequest(http.MethodPost, "/api/verify", bytes.NewReader(body))
+		req := newJSONRequest(http.MethodPost, "/api/verify", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 
@@ -310,7 +316,7 @@ func TestServer_PostVerify_ValidAndBrokenFailOpen(t *testing.T) {
 		body, _ := json.Marshal(VerifyRequest{
 			PolicyPath: "testdata/policies/broken_fail_open.rego",
 		})
-		req := httptest.NewRequest(http.MethodPost, "/api/verify", bytes.NewReader(body))
+		req := newJSONRequest(http.MethodPost, "/api/verify", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 
@@ -379,7 +385,7 @@ deny contains violation if {
 			PolicyPath:    "testdata/policies/storage_encryption.rego",
 			PolicyContent: liveContent,
 		})
-		req := httptest.NewRequest(http.MethodPost, "/api/verify", bytes.NewReader(body))
+		req := newJSONRequest(http.MethodPost, "/api/verify", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 
@@ -415,7 +421,7 @@ func TestServer_PostBacktest_MultiCloudCorpus(t *testing.T) {
 	body, _ := json.Marshal(BacktestRequest{
 		PolicyPath: "testdata/policies/storage_encryption.rego",
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/backtest", bytes.NewReader(body))
+	req := newJSONRequest(http.MethodPost, "/api/backtest", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -462,7 +468,7 @@ func TestServer_PostRemediateAndApply_SandboxVsDisk(t *testing.T) {
 		body, _ := json.Marshal(RemediateRequest{
 			PolicyPath: "testdata/policies/storage_encryption.rego",
 		})
-		req := httptest.NewRequest(http.MethodPost, "/api/remediate", bytes.NewReader(body))
+		req := newJSONRequest(http.MethodPost, "/api/remediate", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 
@@ -506,7 +512,7 @@ func TestServer_PostRemediateAndApply_SandboxVsDisk(t *testing.T) {
 		applyBody, _ := json.Marshal(ApplyRequest{
 			Write: false,
 		})
-		req := httptest.NewRequest(http.MethodPost, "/api/apply", bytes.NewReader(applyBody))
+		req := newJSONRequest(http.MethodPost, "/api/apply", bytes.NewReader(applyBody))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 
@@ -533,7 +539,7 @@ func TestServer_PostRemediateAndApply_SandboxVsDisk(t *testing.T) {
 		}
 
 		// Subsequent POST /api/backtest must report 0 impacted repos (Enforce-Ready).
-		btReq := httptest.NewRequest(http.MethodPost, "/api/backtest", bytes.NewReader([]byte(`{}`)))
+		btReq := newJSONRequest(http.MethodPost, "/api/backtest", bytes.NewReader([]byte(`{}`)))
 		btRec := httptest.NewRecorder()
 		srv.ServeHTTP(btRec, btReq)
 		if btRec.Code != http.StatusOK {
@@ -550,7 +556,7 @@ func TestServer_PostRemediateAndApply_SandboxVsDisk(t *testing.T) {
 
 		// Reset restores initial violations-detected state (3/3 impacted repos).
 		resetBody, _ := json.Marshal(ApplyRequest{Reset: true})
-		resetReq := httptest.NewRequest(http.MethodPost, "/api/apply", bytes.NewReader(resetBody))
+		resetReq := newJSONRequest(http.MethodPost, "/api/apply", bytes.NewReader(resetBody))
 		resetRec := httptest.NewRecorder()
 		srv.ServeHTTP(resetRec, resetReq)
 		if resetRec.Code != http.StatusOK {
@@ -593,7 +599,7 @@ func TestServer_PostRemediateAndApply_SandboxVsDisk(t *testing.T) {
 		applyBody, _ := json.Marshal(ApplyRequest{
 			Write: true,
 		})
-		req := httptest.NewRequest(http.MethodPost, "/api/apply", bytes.NewReader(applyBody))
+		req := newJSONRequest(http.MethodPost, "/api/apply", bytes.NewReader(applyBody))
 		rec := httptest.NewRecorder()
 		writableSrv.ServeHTTP(rec, req)
 
@@ -713,7 +719,7 @@ func TestServer_StateReset_FromEnforceReadyToViolationsDetected(t *testing.T) {
 	}
 
 	// Reset via POST /api/backtest {"reset": true}.
-	btReq := httptest.NewRequest(http.MethodPost, "/api/backtest", bytes.NewReader([]byte(`{"reset": true}`)))
+	btReq := newJSONRequest(http.MethodPost, "/api/backtest", bytes.NewReader([]byte(`{"reset": true}`)))
 	btRec := httptest.NewRecorder()
 	srv.ServeHTTP(btRec, btReq)
 	if btRec.Code != http.StatusOK {
@@ -823,6 +829,9 @@ func TestServer_Security_PathTraversalBlocked(t *testing.T) {
 				bodyReader = bytes.NewReader(raw)
 			}
 			req := httptest.NewRequest(tc.method, tc.path, bodyReader)
+			if tc.body != nil {
+				req.Header.Set("Content-Type", "application/json")
+			}
 			rec := httptest.NewRecorder()
 			srv.ServeHTTP(rec, req)
 
@@ -873,7 +882,7 @@ func TestServer_Security_WrongMethodAndForbiddenWrite(t *testing.T) {
 		body, _ := json.Marshal(ApplyRequest{
 			Write: true,
 		})
-		req := httptest.NewRequest(http.MethodPost, "/api/apply", bytes.NewReader(body))
+		req := newJSONRequest(http.MethodPost, "/api/apply", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 
@@ -886,7 +895,7 @@ func TestServer_Security_WrongMethodAndForbiddenWrite(t *testing.T) {
 		body, _ := json.Marshal(RemediateRequest{
 			Write: true,
 		})
-		req := httptest.NewRequest(http.MethodPost, "/api/remediate", bytes.NewReader(body))
+		req := newJSONRequest(http.MethodPost, "/api/remediate", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 
@@ -903,7 +912,7 @@ func TestServer_Security_MaxBytesReaderOversizedBody(t *testing.T) {
 
 	for _, endpoint := range []string{"/api/verify", "/api/backtest", "/api/remediate", "/api/apply"} {
 		t.Run("Oversized_"+endpoint, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(oversized))
+			req := newJSONRequest(http.MethodPost, endpoint, strings.NewReader(oversized))
 			rec := httptest.NewRecorder()
 			srv.ServeHTTP(rec, req)
 
@@ -919,7 +928,7 @@ func TestServer_InvalidJSONAndMissingFiles(t *testing.T) {
 	srv := newTestServer(t)
 
 	t.Run("MalformedJSON_Returns400", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/verify", strings.NewReader(`{"policy_path": `))
+		req := newJSONRequest(http.MethodPost, "/api/verify", strings.NewReader(`{"policy_path": `))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 
@@ -932,7 +941,7 @@ func TestServer_InvalidJSONAndMissingFiles(t *testing.T) {
 		body, _ := json.Marshal(VerifyRequest{
 			PolicyPath: "testdata/policies/does_not_exist.rego",
 		})
-		req := httptest.NewRequest(http.MethodPost, "/api/verify", bytes.NewReader(body))
+		req := newJSONRequest(http.MethodPost, "/api/verify", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 
@@ -1068,7 +1077,7 @@ func TestServer_EmptyWorkspaceAndCustomUpload(t *testing.T) {
 		}
 		body, _ := json.Marshal(uploadPayload)
 
-		req := httptest.NewRequest(http.MethodPost, "/api/workspace/upload", bytes.NewReader(body))
+		req := newJSONRequest(http.MethodPost, "/api/workspace/upload", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 
@@ -1112,7 +1121,7 @@ func TestServer_EmptyWorkspaceAndCustomUpload(t *testing.T) {
 
 		// 1. Configure mode=empty
 		emptyBody, _ := json.Marshal(WorkspaceConfigureRequest{Mode: "empty"})
-		reqEmpty := httptest.NewRequest(http.MethodPost, "/api/workspace/configure", bytes.NewReader(emptyBody))
+		reqEmpty := newJSONRequest(http.MethodPost, "/api/workspace/configure", bytes.NewReader(emptyBody))
 		recEmpty := httptest.NewRecorder()
 		srv.ServeHTTP(recEmpty, reqEmpty)
 		if recEmpty.Code != http.StatusOK {
@@ -1121,7 +1130,7 @@ func TestServer_EmptyWorkspaceAndCustomUpload(t *testing.T) {
 
 		// 2. Configure mode=demo restores the 3-cloud corpus
 		demoBody, _ := json.Marshal(WorkspaceConfigureRequest{Mode: "demo"})
-		reqDemo := httptest.NewRequest(http.MethodPost, "/api/workspace/configure", bytes.NewReader(demoBody))
+		reqDemo := newJSONRequest(http.MethodPost, "/api/workspace/configure", bytes.NewReader(demoBody))
 		recDemo := httptest.NewRecorder()
 		srv.ServeHTTP(recDemo, reqDemo)
 		if recDemo.Code != http.StatusOK {
@@ -1138,11 +1147,110 @@ func TestServer_EmptyWorkspaceAndCustomUpload(t *testing.T) {
 			Mode:       "paths",
 			PolicyPath: "../../../etc/passwd",
 		})
-		reqBad := httptest.NewRequest(http.MethodPost, "/api/workspace/configure", bytes.NewReader(badBody))
+		reqBad := newJSONRequest(http.MethodPost, "/api/workspace/configure", bytes.NewReader(badBody))
 		recBad := httptest.NewRecorder()
 		srv.ServeHTTP(recBad, reqBad)
 		if recBad.Code != http.StatusBadRequest {
 			t.Errorf("expected 400 Bad Request for path traversal in /api/workspace/configure, got %d", recBad.Code)
+		}
+	})
+}
+
+// TestServer_Security_CSRFAndOriginProtection verifies that mutating endpoints enforce Content-Type: application/json
+// and reject non-loopback / cross-site Origin headers.
+func TestServer_Security_CSRFAndOriginProtection(t *testing.T) {
+	srv := newTestServer(t)
+
+	mutatingEndpoints := []string{
+		"/api/workspace/upload",
+		"/api/workspace/configure",
+		"/api/verify",
+		"/api/backtest",
+		"/api/remediate",
+		"/api/apply",
+	}
+
+	dummyJSON := []byte(`{"policy_path":"testdata/policies/storage_encryption.rego"}`)
+
+	t.Run("MissingContentType_Returns415", func(t *testing.T) {
+		for _, endpoint := range mutatingEndpoints {
+			t.Run(endpoint, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, endpoint, bytes.NewReader(dummyJSON))
+				// Do not set Content-Type
+				rec := httptest.NewRecorder()
+				srv.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusUnsupportedMediaType {
+					t.Errorf("expected 415 Unsupported Media Type for %s without Content-Type, got %d: %s", endpoint, rec.Code, rec.Body.String())
+				}
+			})
+		}
+	})
+
+	t.Run("TextPlainContentType_Returns415", func(t *testing.T) {
+		for _, endpoint := range mutatingEndpoints {
+			t.Run(endpoint, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, endpoint, bytes.NewReader(dummyJSON))
+				req.Header.Set("Content-Type", "text/plain")
+				rec := httptest.NewRecorder()
+				srv.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusUnsupportedMediaType {
+					t.Errorf("expected 415 Unsupported Media Type for %s with text/plain, got %d: %s", endpoint, rec.Code, rec.Body.String())
+				}
+			})
+		}
+	})
+
+	t.Run("FormUrlEncodedContentType_Returns415", func(t *testing.T) {
+		for _, endpoint := range mutatingEndpoints {
+			t.Run(endpoint, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader("foo=bar"))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				rec := httptest.NewRecorder()
+				srv.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusUnsupportedMediaType {
+					t.Errorf("expected 415 Unsupported Media Type for %s with form-urlencoded, got %d: %s", endpoint, rec.Code, rec.Body.String())
+				}
+			})
+		}
+	})
+
+	t.Run("CrossSiteOrigin_Returns403", func(t *testing.T) {
+		for _, endpoint := range mutatingEndpoints {
+			for _, badOrigin := range []string{"http://evil.com", "https://attacker.example.org:8080", "null"} {
+				t.Run(endpoint+"_"+badOrigin, func(t *testing.T) {
+					req := newJSONRequest(http.MethodPost, endpoint, bytes.NewReader(dummyJSON))
+					req.Header.Set("Origin", badOrigin)
+					rec := httptest.NewRecorder()
+					srv.ServeHTTP(rec, req)
+
+					if rec.Code != http.StatusForbidden {
+						t.Errorf("expected 403 Forbidden for %s with Origin %q, got %d: %s", endpoint, badOrigin, rec.Code, rec.Body.String())
+					}
+				})
+			}
+		}
+	})
+
+	t.Run("ValidLoopbackOrigins_Allowed", func(t *testing.T) {
+		for _, goodOrigin := range []string{
+			"http://localhost:8080",
+			"http://127.0.0.1:8080",
+			"http://[::1]:8080",
+			"http://127.0.0.1:3000",
+		} {
+			t.Run(goodOrigin, func(t *testing.T) {
+				req := newJSONRequest(http.MethodPost, "/api/verify", bytes.NewReader(dummyJSON))
+				req.Header.Set("Origin", goodOrigin)
+				rec := httptest.NewRecorder()
+				srv.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusOK {
+					t.Errorf("expected 200 OK for valid loopback Origin %q, got %d: %s", goodOrigin, rec.Code, rec.Body.String())
+				}
+			})
 		}
 	})
 }

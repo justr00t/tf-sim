@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -392,11 +394,17 @@ func NewServer(cfg Config) (*Server, error) {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
+		if !s.validateMutatingRequest(w, r) {
+			return
+		}
 		s.handlePostWorkspaceUpload(w, r)
 	})
 	s.mux.HandleFunc("/api/workspace/configure", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		if !s.validateMutatingRequest(w, r) {
 			return
 		}
 		s.handlePostWorkspaceConfigure(w, r)
@@ -406,11 +414,17 @@ func NewServer(cfg Config) (*Server, error) {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
+		if !s.validateMutatingRequest(w, r) {
+			return
+		}
 		s.handlePostVerify(w, r)
 	})
 	s.mux.HandleFunc("/api/backtest", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		if !s.validateMutatingRequest(w, r) {
 			return
 		}
 		s.handlePostBacktest(w, r)
@@ -420,11 +434,17 @@ func NewServer(cfg Config) (*Server, error) {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
+		if !s.validateMutatingRequest(w, r) {
+			return
+		}
 		s.handlePostRemediate(w, r)
 	})
 	s.mux.HandleFunc("/api/apply", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		if !s.validateMutatingRequest(w, r) {
 			return
 		}
 		s.handlePostApply(w, r)
@@ -2373,6 +2393,56 @@ func (s *Server) writeError(w http.ResponseWriter, err error) {
 	}
 }
 
+func isLoopbackOrigin(originStr string) bool {
+	originStr = strings.TrimSpace(originStr)
+	if originStr == "" {
+		return true
+	}
+	u, err := url.Parse(originStr)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
+func (s *Server) validateMutatingRequest(w http.ResponseWriter, r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin != "" && !isLoopbackOrigin(origin) {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "forbidden: invalid or cross-site origin",
+		})
+		return false
+	}
+
+	ct := r.Header.Get("Content-Type")
+	if strings.TrimSpace(ct) == "" {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{
+			"error": "missing Content-Type header, expected application/json",
+		})
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil || mediaType != "application/json" {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{
+			"error": "unsupported media type, expected application/json",
+		})
+		return false
+	}
+
+	return true
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
@@ -2420,6 +2490,114 @@ const builtinFallbackProviderSchema = `{
               }
             }
           }
+        },
+        "aws_s3_bucket_public_access_block": {
+          "version": 0,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "bucket": { "type": "string", "required": true },
+              "block_public_acls": { "type": "bool", "optional": true },
+              "block_public_policy": { "type": "bool", "optional": true },
+              "ignore_public_acls": { "type": "bool", "optional": true },
+              "restrict_public_buckets": { "type": "bool", "optional": true }
+            }
+          }
+        },
+        "aws_s3_bucket_server_side_encryption_configuration": {
+          "version": 0,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "bucket": { "type": "string", "required": true }
+            },
+            "block_types": {
+              "rule": {
+                "nesting_mode": "set",
+                "block": {
+                  "attributes": {
+                    "bucket_key_enabled": { "type": "bool", "optional": true }
+                  },
+                  "block_types": {
+                    "apply_server_side_encryption_by_default": {
+                      "nesting_mode": "list",
+                      "max_items": 1,
+                      "block": {
+                        "attributes": {
+                          "sse_algorithm": { "type": "string", "required": true },
+                          "kms_master_key_id": { "type": "string", "optional": true }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "aws_s3_bucket_versioning": {
+          "version": 0,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "bucket": { "type": "string", "required": true }
+            },
+            "block_types": {
+              "versioning_configuration": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "status": { "type": "string", "required": true },
+                    "mfa_delete": { "type": "string", "optional": true, "computed": true }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "aws_db_instance": {
+          "version": 2,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "identifier": { "type": "string", "optional": true, "computed": true },
+              "instance_class": { "type": "string", "required": true },
+              "storage_encrypted": { "type": "bool", "optional": true },
+              "publicly_accessible": { "type": "bool", "optional": true },
+              "iam_database_authentication_enabled": { "type": "bool", "optional": true }
+            }
+          }
+        },
+        "aws_ebs_volume": {
+          "version": 0,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "availability_zone": { "type": "string", "required": true },
+              "encrypted": { "type": "bool", "optional": true, "computed": true }
+            }
+          }
+        },
+        "aws_instance": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "ami": { "type": "string", "optional": true, "computed": true },
+              "instance_type": { "type": "string", "optional": true, "computed": true },
+              "ebs_optimized": { "type": "bool", "optional": true, "computed": true }
+            }
+          }
+        },
+        "aws_kms_key": {
+          "version": 0,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "enable_key_rotation": { "type": "bool", "optional": true }
+            }
+          }
         }
       }
     },
@@ -2435,13 +2613,46 @@ const builtinFallbackProviderSchema = `{
               "min_tls_version": { "type": "string", "optional": true }
             }
           }
+        },
+        "azurerm_mssql_server": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "name": { "type": "string", "required": true },
+              "minimum_tls_version": { "type": "string", "optional": true }
+            }
+          }
+        },
+        "azurerm_postgresql_flexible_server": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "name": { "type": "string", "required": true },
+              "public_network_access_enabled": { "type": "bool", "optional": true },
+              "backup_retention_days": { "type": "number", "optional": true, "computed": true }
+            }
+          }
+        },
+        "azurerm_key_vault": {
+          "version": 2,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "name": { "type": "string", "required": true },
+              "soft_delete_retention_days": { "type": "number", "optional": true },
+              "purge_protection_enabled": { "type": "bool", "optional": true },
+              "enable_rbac_authorization": { "type": "bool", "optional": true }
+            }
+          }
         }
       }
     },
     "registry.terraform.io/hashicorp/google": {
       "resource_schemas": {
         "google_storage_bucket": {
-          "version": 0,
+          "version": 3,
           "block": {
             "attributes": {
               "id": { "type": "string", "computed": true },
@@ -2449,6 +2660,101 @@ const builtinFallbackProviderSchema = `{
               "location": { "type": "string", "required": true },
               "uniform_bucket_level_access": { "type": "bool", "optional": true },
               "public_access_prevention": { "type": "string", "optional": true }
+            }
+          }
+        },
+        "google_sql_database_instance": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "name": { "type": "string", "optional": true, "computed": true },
+              "database_version": { "type": "string", "required": true }
+            },
+            "block_types": {
+              "settings": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "tier": { "type": "string", "required": true }
+                  },
+                  "block_types": {
+                    "ip_configuration": {
+                      "nesting_mode": "list",
+                      "max_items": 1,
+                      "block": {
+                        "attributes": {
+                          "ssl_mode": { "type": "string", "optional": true, "computed": true }
+                        }
+                      }
+                    },
+                    "backup_configuration": {
+                      "nesting_mode": "list",
+                      "max_items": 1,
+                      "block": {
+                        "attributes": {
+                          "enabled": { "type": "bool", "optional": true }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "google_compute_instance": {
+          "version": 6,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "name": { "type": "string", "required": true },
+              "machine_type": { "type": "string", "required": true },
+              "can_ip_forward": { "type": "bool", "optional": true }
+            },
+            "block_types": {
+              "shielded_instance_config": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "enable_secure_boot": { "type": "bool", "optional": true }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "google_kms_crypto_key": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "name": { "type": "string", "required": true },
+              "key_ring": { "type": "string", "required": true },
+              "rotation_period": { "type": "string", "optional": true }
+            }
+          }
+        },
+        "google_compute_firewall": {
+          "version": 1,
+          "block": {
+            "attributes": {
+              "id": { "type": "string", "computed": true },
+              "name": { "type": "string", "required": true },
+              "network": { "type": "string", "required": true }
+            },
+            "block_types": {
+              "log_config": {
+                "nesting_mode": "list",
+                "max_items": 1,
+                "block": {
+                  "attributes": {
+                    "metadata": { "type": "string", "required": true }
+                  }
+                }
+              }
             }
           }
         }

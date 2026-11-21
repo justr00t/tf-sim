@@ -1,0 +1,157 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.0",
+  "planned_values": {
+    "root_module": {
+      "resources": []
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "azurerm_storage_account.compliant",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "compliantstorage01",
+          "https_traffic_only_enabled": true,
+          "min_tls_version": "TLS1_2"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_mssql_server.compliant",
+      "mode": "managed",
+      "type": "azurerm_mssql_server",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "compliant-mssql-srv",
+          "minimum_tls_version": "1.2"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_postgresql_flexible_server.compliant",
+      "mode": "managed",
+      "type": "azurerm_postgresql_flexible_server",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "compliant-psql-flex",
+          "public_network_access_enabled": false,
+          "backup_retention_days": 7
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_key_vault.compliant",
+      "mode": "managed",
+      "type": "azurerm_key_vault",
+      "name": "compliant",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "compliant-kv-01",
+          "soft_delete_retention_days": 90,
+          "purge_protection_enabled": true,
+          "enable_rbac_authorization": true
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_storage_account.deleted_noncompliant",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "legacystorage01",
+          "https_traffic_only_enabled": false,
+          "min_tls_version": "TLS1_0"
+        },
+        "after": null,
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_mssql_server.deleted_noncompliant",
+      "mode": "managed",
+      "type": "azurerm_mssql_server",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "legacy-mssql",
+          "minimum_tls_version": "1.0"
+        },
+        "after": {
+          "name": "legacy-mssql",
+          "minimum_tls_version": "1.0"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_postgresql_flexible_server.deleted_noncompliant",
+      "mode": "managed",
+      "type": "azurerm_postgresql_flexible_server",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "legacy-psql",
+          "public_network_access_enabled": true,
+          "backup_retention_days": 1
+        },
+        "after": {
+          "name": "legacy-psql",
+          "public_network_access_enabled": true,
+          "backup_retention_days": 1
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "azurerm_key_vault.deleted_noncompliant",
+      "mode": "managed",
+      "type": "azurerm_key_vault",
+      "name": "deleted_noncompliant",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "legacy-kv",
+          "soft_delete_retention_days": 7,
+          "purge_protection_enabled": false,
+          "enable_rbac_authorization": false
+        },
+        "after": null,
+        "after_unknown": {}
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {}
+  }
+}

@@ -15,8 +15,9 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Ensure Runner satisfies model.BacktestRunner at compile time.
+// Ensure Runner satisfies model.BacktestRunner and model.ContentBacktestRunner at compile time.
 var _ model.BacktestRunner = (*Runner)(nil)
+var _ model.ContentBacktestRunner = (*Runner)(nil)
 
 // Runner coordinates concurrent evaluation of historical plan snapshots against candidate policies.
 type Runner struct {
@@ -122,8 +123,69 @@ func (r *Runner) RunBacktest(ctx context.Context, policyPaths []string, snapshot
 		return nil, fmt.Errorf("at least one policy path must be provided")
 	}
 
+	return r.runBacktestWithEvalFn(ctx, strings.Join(policyPaths, ", "), snapshots, func(gctx context.Context, s *model.PlanSnapshot) (*model.EvalResult, error) {
+		return r.evaluator.EvaluatePlan(gctx, policyPaths, s)
+	})
+}
+
+// RunBacktestContents evaluates in-memory Rego policy contents concurrently across the provided plan snapshots.
+func (r *Runner) RunBacktestContents(ctx context.Context, policies []model.PolicyContent, snapshots []*model.PlanSnapshot) (*model.BlastRadiusReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(policies) == 0 {
+		return nil, fmt.Errorf("at least one policy must be provided")
+	}
+
+	policyLabels := make([]string, len(policies))
+	for i, p := range policies {
+		if p.Path != "" {
+			policyLabels[i] = p.Path
+		} else {
+			policyLabels[i] = fmt.Sprintf("policy_%d.rego", i)
+		}
+	}
+	joinedPolicyPath := strings.Join(policyLabels, ", ")
+
+	if contentEval, ok := r.evaluator.(model.ContentPolicyEvaluator); ok {
+		return r.runBacktestWithEvalFn(ctx, joinedPolicyPath, snapshots, func(gctx context.Context, s *model.PlanSnapshot) (*model.EvalResult, error) {
+			return contentEval.EvaluatePlanContents(gctx, policies, s)
+		})
+	}
+
+	// Fallback when a custom model.PolicyEvaluator mock without ContentPolicyEvaluator is injected.
+	if len(snapshots) == 0 {
+		return r.runBacktestWithEvalFn(ctx, joinedPolicyPath, snapshots, nil)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "tfsim-backtest-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating temporary policy directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tempPaths := make([]string, 0, len(policies))
+	for i, p := range policies {
+		tmpFile := filepath.Join(tmpDir, fmt.Sprintf("policy_%03d.rego", i))
+		if err := os.WriteFile(tmpFile, p.Content, 0o600); err != nil {
+			return nil, fmt.Errorf("writing temporary policy %q: %w", policyLabels[i], err)
+		}
+		tempPaths = append(tempPaths, tmpFile)
+	}
+
+	return r.runBacktestWithEvalFn(ctx, joinedPolicyPath, snapshots, func(gctx context.Context, s *model.PlanSnapshot) (*model.EvalResult, error) {
+		return r.evaluator.EvaluatePlan(gctx, tempPaths, s)
+	})
+}
+
+func (r *Runner) runBacktestWithEvalFn(
+	ctx context.Context,
+	policyLabel string,
+	snapshots []*model.PlanSnapshot,
+	evalFn func(ctx context.Context, s *model.PlanSnapshot) (*model.EvalResult, error),
+) (*model.BlastRadiusReport, error) {
 	report := &model.BlastRadiusReport{
-		PolicyPath:          strings.Join(policyPaths, ", "),
+		PolicyPath:          policyLabel,
 		TotalReposAnalyzed:  0,
 		ImpactedReposCount:  0,
 		TotalPlansAnalyzed:  0,
@@ -156,7 +218,7 @@ func (r *Runner) RunBacktest(ctx context.Context, policyPaths []string, snapshot
 		idx := i
 		s := snap
 		g.Go(func() error {
-			res, err := r.evaluator.EvaluatePlan(gctx, policyPaths, s)
+			res, err := evalFn(gctx, s)
 			if err != nil {
 				return fmt.Errorf("evaluating plan %s (repo %s): %w", s.SnapshotID, s.RepoName, err)
 			}

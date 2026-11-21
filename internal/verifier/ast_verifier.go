@@ -23,6 +23,7 @@ func NewVerifier() *Verifier {
 }
 
 var _ model.ASTVerifier = (*Verifier)(nil)
+var _ model.ContentASTVerifier = (*Verifier)(nil)
 
 type intermediateBinding struct {
 	resourceType string
@@ -39,25 +40,8 @@ type parsedModule struct {
 	mod  *ast.Module
 }
 
-// VerifyPolicy performs static analysis on a single Rego policy against the provider schema.
-func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas model.ProviderSchemaMap) (*model.VerificationResult, error) {
-	return v.VerifyPolicies(ctx, []string{policyPath}, schemas)
-}
-
-// VerifyPolicies performs static analysis on one or more Rego policy files against the provider schema.
-func (v *Verifier) VerifyPolicies(ctx context.Context, policyPaths []string, schemas model.ProviderSchemaMap) (*model.VerificationResult, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if len(policyPaths) == 0 {
-		return nil, fmt.Errorf("at least one policy path must be provided")
-	}
-
-	joinedPolicyPath := strings.Join(policyPaths, ", ")
-	orderedModules := make([]parsedModule, 0, len(policyPaths))
-	modulesMap := make(map[string]*ast.Module, len(policyPaths))
-	var parseDiags []model.SchemaDiagnostic
-
+func readPolicyFiles(ctx context.Context, policyPaths []string) ([]model.PolicyContent, error) {
+	policies := make([]model.PolicyContent, 0, len(policyPaths))
 	for _, p := range policyPaths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -76,7 +60,71 @@ func (v *Verifier) VerifyPolicies(ctx context.Context, policyPaths []string, sch
 			return nil, fmt.Errorf("read policy file %s: %w", p, err)
 		}
 
-		mod, err := ast.ParseModuleWithOpts(p, string(content), ast.ParserOptions{RegoVersion: ast.RegoV1})
+		policies = append(policies, model.PolicyContent{
+			Path:    p,
+			Content: content,
+		})
+	}
+	return policies, nil
+}
+
+// VerifyPolicy performs static analysis on a single Rego policy against the provider schema.
+func (v *Verifier) VerifyPolicy(ctx context.Context, policyPath string, schemas model.ProviderSchemaMap) (*model.VerificationResult, error) {
+	return v.VerifyPolicies(ctx, []string{policyPath}, schemas)
+}
+
+// VerifyPolicies performs static analysis on one or more Rego policy files against the provider schema.
+func (v *Verifier) VerifyPolicies(ctx context.Context, policyPaths []string, schemas model.ProviderSchemaMap) (*model.VerificationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(policyPaths) == 0 {
+		return nil, fmt.Errorf("at least one policy path must be provided")
+	}
+
+	policies, err := readPolicyFiles(ctx, policyPaths)
+	if err != nil {
+		return nil, err
+	}
+
+	return v.VerifyPoliciesContents(ctx, policies, schemas)
+}
+
+// VerifyPolicyContents performs static analysis on a single in-memory Rego policy against the provider schema.
+func (v *Verifier) VerifyPolicyContents(ctx context.Context, policy model.PolicyContent, schemas model.ProviderSchemaMap) (*model.VerificationResult, error) {
+	return v.VerifyPoliciesContents(ctx, []model.PolicyContent{policy}, schemas)
+}
+
+// VerifyPoliciesContents performs static analysis on one or more in-memory Rego policies against the provider schema.
+func (v *Verifier) VerifyPoliciesContents(ctx context.Context, policies []model.PolicyContent, schemas model.ProviderSchemaMap) (*model.VerificationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(policies) == 0 {
+		return nil, fmt.Errorf("at least one policy must be provided")
+	}
+
+	policyNames := make([]string, len(policies))
+	for i, p := range policies {
+		if p.Path != "" {
+			policyNames[i] = p.Path
+		} else {
+			policyNames[i] = fmt.Sprintf("policy_%d.rego", i)
+		}
+	}
+
+	joinedPolicyPath := strings.Join(policyNames, ", ")
+	orderedModules := make([]parsedModule, 0, len(policies))
+	modulesMap := make(map[string]*ast.Module, len(policies))
+	var parseDiags []model.SchemaDiagnostic
+
+	for i, policy := range policies {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		p := policyNames[i]
+		mod, err := ast.ParseModuleWithOpts(p, string(policy.Content), ast.ParserOptions{RegoVersion: ast.RegoV1})
 		if err != nil {
 			if astErrors, ok := err.(ast.Errors); ok {
 				for _, e := range astErrors {
@@ -118,12 +166,10 @@ func (v *Verifier) VerifyPolicies(ctx context.Context, policyPaths []string, sch
 	var uniquePkgs []string
 	seenPkg := make(map[string]bool)
 	for _, pm := range orderedModules {
-		if pm.mod.Package != nil && pm.mod.Package.Path != nil {
-			pkg := strings.TrimPrefix(pm.mod.Package.Path.String(), "data.")
-			if pkg != "" && !seenPkg[pkg] {
-				seenPkg[pkg] = true
-				uniquePkgs = append(uniquePkgs, pkg)
-			}
+		pkg := modulePackageName(pm.mod)
+		if pkg != "" && !seenPkg[pkg] {
+			seenPkg[pkg] = true
+			uniquePkgs = append(uniquePkgs, pkg)
 		}
 	}
 	pkgName := strings.Join(uniquePkgs, ", ")
@@ -134,7 +180,7 @@ func (v *Verifier) VerifyPolicies(ctx context.Context, policyPaths []string, sch
 		var diags []model.SchemaDiagnostic
 		for _, e := range compiler.Errors {
 			row := 1
-			file := policyPaths[0]
+			file := policyNames[0]
 			if e.Location != nil {
 				if e.Location.Row > 0 {
 					row = e.Location.Row
@@ -196,16 +242,24 @@ func (v *Verifier) VerifyPolicies(ctx context.Context, policyPaths []string, sch
 		}, nil
 	}
 
-	// Index rules across all policy modules in deterministic order.
+	// Index rules across all policy modules in deterministic order, scoped by package.
 	var allRules []*ast.Rule
 	ruleFile := make(map[*ast.Rule]string)
-	rulesByName := make(map[string][]*ast.Rule)
+	ruleMod := make(map[*ast.Rule]*ast.Module)
+	rulePkg := make(map[*ast.Rule]string)
+	rulesByPkg := make(map[string]map[string][]*ast.Rule)
 	for _, pm := range orderedModules {
+		pkg := modulePackageName(pm.mod)
+		if _, ok := rulesByPkg[pkg]; !ok {
+			rulesByPkg[pkg] = make(map[string][]*ast.Rule)
+		}
 		for _, r := range pm.mod.Rules {
 			allRules = append(allRules, r)
 			ruleFile[r] = pm.path
+			ruleMod[r] = pm.mod
+			rulePkg[r] = pkg
 			name := r.Head.Name.String()
-			rulesByName[name] = append(rulesByName[name], r)
+			rulesByPkg[pkg][name] = append(rulesByPkg[pkg][name], r)
 		}
 	}
 
@@ -229,7 +283,7 @@ func (v *Verifier) VerifyPolicies(ctx context.Context, policyPaths []string, sch
 
 		// Check for helper rule calls in this rule for each binding set.
 		for _, lt := range localBindingSets {
-			propagateHelperCalls(r, lt, rulesByName, ruleBindings)
+			propagateHelperCalls(r, lt, ruleMod, rulePkg, rulesByPkg, ruleBindings)
 		}
 	}
 
@@ -272,6 +326,13 @@ func (v *Verifier) VerifyPolicies(ctx context.Context, policyPaths []string, sch
 		Valid:       len(diagnostics) == 0,
 		Diagnostics: diagnostics,
 	}, nil
+}
+
+func modulePackageName(mod *ast.Module) string {
+	if mod == nil || mod.Package == nil || mod.Package.Path == nil {
+		return ""
+	}
+	return strings.TrimPrefix(mod.Package.Path.String(), "data.")
 }
 
 // scanRuleResourceTypes discovers resource types bound in rule expressions
@@ -433,7 +494,17 @@ func getRootVar(ref ast.Ref) string {
 
 // propagateHelperCalls discovers calls to other rules in the policy (including across files/packages)
 // and propagates parameter resource types.
-func propagateHelperCalls(r *ast.Rule, localTypes map[string]string, rulesByName map[string][]*ast.Rule, ruleBindings map[*ast.Rule][]map[string]string) {
+func propagateHelperCalls(
+	r *ast.Rule,
+	localTypes map[string]string,
+	ruleMod map[*ast.Rule]*ast.Module,
+	rulePkg map[*ast.Rule]string,
+	rulesByPkg map[string]map[string][]*ast.Rule,
+	ruleBindings map[*ast.Rule][]map[string]string,
+) {
+	callerMod := ruleMod[r]
+	callerPkg := rulePkg[r]
+
 	for _, expr := range r.Body {
 		callSlices := extractExprCallSlices(expr)
 		for _, terms := range callSlices {
@@ -441,13 +512,8 @@ func propagateHelperCalls(r *ast.Rule, localTypes map[string]string, rulesByName
 				continue
 			}
 
-			fnName := extractCalledRuleName(terms[0])
-			if fnName == "" {
-				continue
-			}
-
-			targetRules, exists := rulesByName[fnName]
-			if !exists {
+			targetRules := resolveCalledRules(callerMod, callerPkg, terms[0], rulesByPkg)
+			if len(targetRules) == 0 {
 				continue
 			}
 
@@ -474,11 +540,136 @@ func propagateHelperCalls(r *ast.Rule, localTypes map[string]string, rulesByName
 				if len(trBindings) > 0 && !hasBindingSet(ruleBindings[tr], trBindings) {
 					ruleBindings[tr] = append(ruleBindings[tr], trBindings)
 					// Propagate recursively
-					propagateHelperCalls(tr, trBindings, rulesByName, ruleBindings)
+					propagateHelperCalls(tr, trBindings, ruleMod, rulePkg, rulesByPkg, ruleBindings)
 				}
 			}
 		}
 	}
+}
+
+func resolveCalledRules(
+	callerMod *ast.Module,
+	callerPkg string,
+	fnTerm *ast.Term,
+	rulesByPkg map[string]map[string][]*ast.Rule,
+) []*ast.Rule {
+	if fnTerm == nil || fnTerm.Value == nil {
+		return nil
+	}
+
+	resolveUnqualified := func(fnName string) []*ast.Rule {
+		if fnName == "" {
+			return nil
+		}
+		if callerMod != nil {
+			for _, imp := range callerMod.Imports {
+				if imp == nil || imp.Path == nil {
+					continue
+				}
+				impRef, ok := imp.Path.Value.(ast.Ref)
+				if !ok || len(impRef) < 3 || getRootVar(impRef) != "data" {
+					continue
+				}
+				impSegs := extractRefStringSegments(impRef[1:])
+				if len(impSegs) < 2 {
+					continue
+				}
+				alias := string(imp.Alias)
+				if alias == "" {
+					alias = impSegs[len(impSegs)-1]
+				}
+				if alias == fnName {
+					targetPkg := strings.Join(impSegs[:len(impSegs)-1], ".")
+					targetRule := impSegs[len(impSegs)-1]
+					if pkgRules, ok := rulesByPkg[targetPkg]; ok {
+						if matches := pkgRules[targetRule]; len(matches) > 0 {
+							return matches
+						}
+					}
+				}
+			}
+		}
+		if pkgRules, ok := rulesByPkg[callerPkg]; ok {
+			return pkgRules[fnName]
+		}
+		return nil
+	}
+
+	switch val := fnTerm.Value.(type) {
+	case ast.Var:
+		return resolveUnqualified(string(val))
+	case ast.Ref:
+		if len(val) == 0 {
+			return nil
+		}
+		if len(val) == 1 {
+			if v, ok := val[0].Value.(ast.Var); ok {
+				return resolveUnqualified(string(v))
+			}
+			return nil
+		}
+		root := getRootVar(val)
+		segs := extractRefStringSegments(val[1:])
+		if len(segs) == 0 {
+			return nil
+		}
+		if root == "data" {
+			if len(segs) < 2 {
+				return nil
+			}
+			targetPkg := strings.Join(segs[:len(segs)-1], ".")
+			targetRule := segs[len(segs)-1]
+			if pkgRules, ok := rulesByPkg[targetPkg]; ok {
+				return pkgRules[targetRule]
+			}
+			return nil
+		}
+		if callerMod != nil && root != "" {
+			for _, imp := range callerMod.Imports {
+				if imp == nil || imp.Path == nil {
+					continue
+				}
+				impRef, ok := imp.Path.Value.(ast.Ref)
+				if !ok || len(impRef) < 2 || getRootVar(impRef) != "data" {
+					continue
+				}
+				impSegs := extractRefStringSegments(impRef[1:])
+				if len(impSegs) == 0 {
+					continue
+				}
+				alias := string(imp.Alias)
+				if alias == "" {
+					alias = impSegs[len(impSegs)-1]
+				}
+				if alias == root {
+					combined := append(append([]string{}, impSegs...), segs...)
+					if len(combined) >= 2 {
+						targetPkg := strings.Join(combined[:len(combined)-1], ".")
+						targetRule := combined[len(combined)-1]
+						if pkgRules, ok := rulesByPkg[targetPkg]; ok {
+							return pkgRules[targetRule]
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func extractRefStringSegments(terms []*ast.Term) []string {
+	segs := make([]string, 0, len(terms))
+	for _, t := range terms {
+		if t == nil {
+			return nil
+		}
+		s, ok := t.Value.(ast.String)
+		if !ok {
+			return nil
+		}
+		segs = append(segs, string(s))
+	}
+	return segs
 }
 
 func extractExprCallSlices(expr *ast.Expr) [][]*ast.Term {
@@ -494,29 +685,6 @@ func extractExprCallSlices(expr *ast.Expr) [][]*ast.Term {
 		}
 	}
 	return result
-}
-
-func extractCalledRuleName(fnTerm *ast.Term) string {
-	if fnTerm == nil || fnTerm.Value == nil {
-		return ""
-	}
-	switch val := fnTerm.Value.(type) {
-	case ast.Var:
-		return string(val)
-	case ast.Ref:
-		if len(val) == 0 {
-			return ""
-		}
-		last := val[len(val)-1]
-		if v, ok := last.Value.(ast.Var); ok {
-			return string(v)
-		}
-		if s, ok := last.Value.(ast.String); ok {
-			return string(s)
-		}
-		return last.String()
-	}
-	return ""
 }
 
 func hasBindingSet(existingSets []map[string]string, candidate map[string]string) bool {
@@ -1149,7 +1317,32 @@ func (v *Verifier) VerifyPoliciesWithFixtures(
 	passFixturePaths []string,
 	failFixturePaths []string,
 ) (*model.VerificationResult, error) {
-	res, err := v.VerifyPolicies(ctx, policyPaths, schemas)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(policyPaths) == 0 {
+		return nil, fmt.Errorf("at least one policy path must be provided")
+	}
+
+	policies, err := readPolicyFiles(ctx, policyPaths)
+	if err != nil {
+		return nil, err
+	}
+
+	return v.VerifyPoliciesContentsWithFixtures(ctx, policies, schemas, passFixturePaths, failFixturePaths)
+}
+
+// VerifyPoliciesContentsWithFixtures performs static AST and provider schema analysis on one or more in-memory Rego policies,
+// and additionally evaluates optional pass-fixture plans (expecting 0 violations) and fail-fixture plans
+// (expecting >= 1 violation).
+func (v *Verifier) VerifyPoliciesContentsWithFixtures(
+	ctx context.Context,
+	policies []model.PolicyContent,
+	schemas model.ProviderSchemaMap,
+	passFixturePaths []string,
+	failFixturePaths []string,
+) (*model.VerificationResult, error) {
+	res, err := v.VerifyPoliciesContents(ctx, policies, schemas)
 	if err != nil {
 		return nil, err
 	}
@@ -1176,14 +1369,17 @@ func (v *Verifier) VerifyPoliciesWithFixtures(
 	}
 
 	ev := engine.NewEvaluator()
-	policyFileLabel := policyPaths[0]
+	policyFileLabel := policies[0].Path
+	if policyFileLabel == "" {
+		policyFileLabel = "policy_0.rego"
+	}
 	var fixtureDiags []model.SchemaDiagnostic
 
 	for _, fs := range passSnaps {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		evalRes, err := ev.EvaluatePlan(ctx, policyPaths, fs.snapshot)
+		evalRes, err := ev.EvaluatePlanContents(ctx, policies, fs.snapshot)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating pass fixture %q: %w", fs.displayPath, err)
 		}
@@ -1216,7 +1412,7 @@ func (v *Verifier) VerifyPoliciesWithFixtures(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		evalRes, err := ev.EvaluatePlan(ctx, policyPaths, fs.snapshot)
+		evalRes, err := ev.EvaluatePlanContents(ctx, policies, fs.snapshot)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating fail fixture %q: %w", fs.displayPath, err)
 		}
