@@ -1,6 +1,6 @@
 name: "tf-sim Terraform & OpenTofu Policy Engine"
 author: "justr00t"
-description: "Verify Rego policies, evaluate Terraform/OpenTofu plans, preview surgical HCL remediation diffs, post sticky PR comments, and upload SARIF v2.1.0 reports."
+description: "Verify Rego policies, evaluate Terraform/OpenTofu plans, preview HCL fix diffs, comment on PRs, and upload SARIF."
 branding:
   icon: "shield"
   color: "yellow"
