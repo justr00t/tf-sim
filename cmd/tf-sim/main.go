@@ -66,11 +66,14 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return ExitOK
 }
 
-// NewRootCmd constructs the root cobra.Command for tf-sim with verify, eval, backtest, remediate, scrub, packs, and serve subcommands.
+// NewRootCmd constructs the root cobra.Command for tf-sim with verify, eval, backtest, remediate, scrub, packs, serve, and version subcommands.
 func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
+	info := currentBuildInfo()
+
 	rootCmd := &cobra.Command{
 		Use:           "tf-sim",
 		Short:         "Cloud-agnostic Terraform/OpenTofu policy verification, blast-radius simulation, and HCL remediation engine",
+		Version:       fmt.Sprintf("%s (commit: %s, built: %s)", info.Version, info.Commit, info.Date),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		CompletionOptions: cobra.CompletionOptions{
@@ -78,6 +81,7 @@ func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		},
 	}
 
+	rootCmd.SetVersionTemplate("tf-sim version {{.Version}}\n")
 	rootCmd.SetOut(stdout)
 	rootCmd.SetErr(stderr)
 
@@ -89,6 +93,7 @@ func NewRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newScrubCmd(stdout, stderr),
 		newPacksCmd(stdout, stderr),
 		newServeCmd(stdout, stderr),
+		newVersionCmd(stdout),
 	)
 
 	return rootCmd
